@@ -1,0 +1,165 @@
+# power_test.toml — full config template
+# =====================================
+#
+# Drop this at `./power_test.toml` (cwd) or `~/.power_test/config.toml`.
+# Invoke with `power_test run --config <path>` (or let it auto-discover).
+# Every field is OPTIONAL — anything you omit falls back to the CLI flag
+# (or the clap default). CLI flags always win over TOML.
+#
+# Run `power_test run --print-config` to see the merged config dumped as
+# TOML — useful for debugging "what did my TOML actually contribute?"
+#
+# Schema reference: src/config_io.rs (TomlConfig struct).
+
+# -------- Endpoint --------
+
+# Full URL of the chat-completions / messages endpoint.
+# Required after merge (no default). The CLI's --target flag overrides.
+target = "http://192.168.31.101:8317/v1/chat/completions"
+
+# API family:
+#   "openai"    — OpenAI Chat Completions + any OpenAI-compatible
+#                 server (vLLM, llama.cpp, ollama, TGI, Anspire,
+#                 etc.). Default.
+#   "anthropic" — Anthropic Messages API (/v1/messages). Requires
+#                 --api-key.
+#   "raw"       — any HTTP endpoint with a static body. Pair with
+#                 raw_body_file + raw_content_type.
+api = "openai"
+
+# Model name sent in the request body. Whatever the model
+# identifies itself as. The CLI's --model flag overrides.
+# (M6g) Use --model-alias to override the *history grouping key*
+# without changing the actual model name — see below.
+model = "MiniMax-M3"
+
+# (M6g) Alias for the model. Use this when the real model name
+# carries a date suffix (DeepSeek-V4-Flash-20260115,
+# claude-3-haiku-20240229) but you want every snapshot of the
+# same underlying model to land in the same
+# <history>/<alias>/ subdirectory and show up in each other's
+# compare dropdown. When omitted, the model name is used as the
+# group key (M6f behavior).
+#
+#   # All these runs land in <history>/DeepSeek-V4-Flash/ :
+#   power_test run --model DeepSeek-V4-Flash-20260115 --model-alias DeepSeek-V4-Flash ...
+#   power_test run --model DeepSeek-V4-Flash-20260201 --model-alias DeepSeek-V4-Flash ...
+model_alias = "DeepSeek-V4-Flash"
+
+# -------- Load --------
+
+# Steady-state RPS for `constant` and `soak`; baseline for `spike`.
+# Ignored by `ramp` (use --rps-start / --rps-end).
+rps = 10.0
+
+# Duration of the test in seconds. Always pin this; the 60s
+# default is a trap for serious runs.
+duration = 60
+
+# Max tokens for the completion. Lower for latency benchmarks.
+max_tokens = 256
+
+# Whether to request streaming. Keep true (default) for TTFT/ITL/TPS.
+stream = true
+
+# Concurrency cap. Default: max(256, peak_rps * 4) capped at 1024.
+concurrency = 64
+
+# -------- Tag --------
+
+# Free-form tag for this run. Logged in summary.txt and indexed
+# in index.json. Convention: "<model>-<rps>rps-<duration>s".
+# The tag is the easiest way to find the run later for `compare`.
+tag = "DeepSeek-V4-Flash-10rps-60s"
+
+# -------- Auth --------
+
+# Name of an env var whose value should be used as the API key.
+# The actual key value is read from the env at config time, so
+# the key never lands in this file. Use this instead of pasting
+# a real key into TOML.
+#
+# PowerShell:  $env:OPENAI_API_KEY = "sk-..."  ;  power_test run --config .\power_test.toml
+# bash:        export OPENAI_API_KEY=sk-...    ;  power_test run --config ./power_test.toml
+#
+# Both `OPENAI_API_KEY` (default for --api-key) and any other env
+# var name work. CLI's --api-key overrides.
+api_key_env = "OPENAI_API_KEY"
+
+# -------- Load pattern --------
+
+# `pattern.kind` selects the load shape. The fields below depend
+# on the kind. Omit [pattern] entirely for `constant` at --rps.
+[pattern]
+# One of: "constant", "ramp", "spike", "soak".
+kind = "ramp"
+
+# -- ramp fields --
+# Linear interpolation from start to end over `duration` seconds.
+start = 1.0
+end = 25.0
+# `duration` is read from the top-level field unless overridden
+# here. duration = 120.0   # optional override
+
+# -- constant fields --
+# kind = "constant"
+# rps = 10.0              # overrides the top-level `rps` if set
+
+# -- spike fields --
+# kind = "spike"
+# baseline = 5.0          # RPS outside spikes
+# [[pattern.spikes]]
+# at_secs = 30.0          # when the spike starts
+# rps = 80.0              # RPS during the spike
+# duration_secs = 5.0     # how long the spike lasts
+# (multiple [[pattern.spikes]] entries are allowed; --spike-rps
+# and --spike-duration are shared across all of them on the CLI)
+
+# -- soak fields --
+# kind = "soak"
+# rps = 5.0               # steady RPS for the whole run
+# checkpoint_secs = 60    # how often to flush metrics.json
+#                         # (default 60, set 0 to disable)
+
+# -------- Dataset --------
+
+# `dataset.kind` selects the prompt source. Omit [dataset] to use
+# --prompt / --prompt-tokens from the CLI.
+[dataset]
+# One of: "literal", "token-budget", "built-in",
+#         "sharegpt", "custom".
+kind = "custom"
+
+# -- literal fields --
+# kind = "literal"
+# text = "Reply with the single word: ok"   # default if absent
+
+# -- token-budget fields --
+# kind = "token-budget"
+# target_tokens = 200   # approximate prompt length
+
+# -- built-in fields --
+# kind = "built-in"     # 12-prompt pool of mixed English + Chinese
+
+# -- sharegpt fields --
+# kind = "sharegpt"
+# path = "sharegpt.json"   # path to the ShareGPT JSON file
+
+# -- custom fields --
+# kind = "custom"
+path = "datasets/single-turn-prompts.jsonl"
+
+# -------- Request strategy (multi-prompt datasets only) --------
+
+# "random" (default) or "round-robin". Random uses a tiny
+# xorshift64 PRNG and eventually visits every prompt. Round-robin
+# is deterministic — useful when you want every prompt hit at a
+# known cadence.
+strategy = "round-robin"
+
+# -------- Raw client (only when api = "raw") --------
+
+# Path to a static body file. Read once at startup.
+raw_body_file = "raw-body.json"
+# Content-Type for the body. Defaults to "application/json".
+raw_content_type = "application/json"

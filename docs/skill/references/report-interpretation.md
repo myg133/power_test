@@ -90,6 +90,75 @@ better, and it usually trades against TTFT.
 - TPS p99 < 50% of mean: severe tail-degradation. Often
   coincides with a spike in latency p99.9.
 
+## M6e: prompt cache section (multi-turn / long-prefix runs)
+
+When the run sees any prompt-cache data, `summary.txt` gains a
+`prompt cache` block:
+
+```
+prompt cache
+------------
+  hit rate:        50.00%   (100 / 200 prompt tokens)
+    turn 1:         0.00%   (0 / 100 prompt tokens)
+    turn 2+:      100.00%   (100 / 100 prompt tokens)
+  cache creation: 100 tokens (turn 1: 100 · turn 2+: 0)
+```
+
+- **`hit rate`**: `100 * cache_hit_tokens / total_prompt_tokens`.
+  Across the whole run. The headline number.
+- **`turn 1`**: hit rate on the first turn of a session (or
+  any single-turn request). Almost always 0% on the first
+  turn of a long-prefix session because the model has to
+  read or build the cache.
+- **`turn 2+`**: hit rate on continuation turns. For a
+  well-tuned inference backend with prompt cache enabled,
+  this should be **~100%**. A drop here is the earliest
+  signal that KV cache is being evicted or the prefix is
+  being rebuilt unnecessarily.
+- **`cache creation`**: tokens the model wrote to cache.
+  Anthropic reports this as `usage.cache_creation_input_tokens`;
+  OpenAI does not. On the first turn of a long-prefix run
+  this number can be large (it's the one-time cost of caching
+  the prefix); on later turns it should be 0.
+
+The HTML report renders the same numbers as a "Prompt cache"
+card with the global rate as a large headline and three bar
+rows (overall / turn 1 / turn 2+). The section is hidden when
+no cache data was observed (single-turn runs, endpoints that
+don't report cache fields).
+
+## M6: session stats (multi-turn runs only)
+
+Multi-turn runs (M6 dynamic_multi, with a TOML profile that
+has `follow_ups`) also report session bookkeeping. The
+`metrics.json` and `summary.txt` carry:
+
+- **`session_count`**: number of distinct sessions that
+  completed at least one turn.
+- **`session_turn_total`**: sum of per-session turn counts.
+  Should equal `session_count × (1 + average follow_up count)`
+  for a clean run.
+- **`session_dropped`**: number of sessions that bailed out
+  mid-conversation because a turn returned non-2xx. Should be
+  0 for a healthy run; nonzero indicates an endpoint
+  problem that's not catastrophic enough to fail the whole
+  run.
+
+## M6f / M6g: model grouping in the history directory
+
+The history layout is now `<root>/<group_key>/<run_id>/` where
+`group_key` is the alias (if `--model-alias` is set) or the
+model name. The `config.json` inside the run directory carries
+both the real `model` string and the `model_alias` (when set),
+so reports always show the actual model name. The grouping key
+is just for filesystem hygiene and the compare-with dropdown.
+
+`compare` warns when the two runs have different group keys
+("different model alias: 'A' vs 'B' (runs are in different
+history subdirectories)"). That's the signal that the diff
+is comparing across different logical models, even when the
+literal model string happens to match.
+
 ## Other sections of `summary.txt`
 
 ### rps: 4.93 achieved (5.00 target)

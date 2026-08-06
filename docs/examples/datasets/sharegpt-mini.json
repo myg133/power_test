@@ -1,0 +1,22 @@
+[
+  {
+    "conversations": [
+      {"from": "human",     "value": "Hi! Can you help me with a quick question about Rust?"},
+      {"from": "gpt",       "value": "Sure! What's the question?"},
+      {"from": "human",     "value": "What's the difference between `String` and `&str`?"},
+      {"from": "gpt",       "value": "`String` is an owned, heap-allocated, growable UTF-8 string. `&str` is a borrowed string slice — a fat pointer (pointer + length) into UTF-8 data that lives somewhere else."}
+    ]
+  },
+  {
+    "conversations": [
+      {"from": "human",     "value": "What does the `?` operator do?"},
+      {"from": "gpt",       "value": "It early-returns from the current function when the right-hand-side expression is an `Err` (or `None` when used with `Option`). Equivalent to a `match` + `return`."}
+    ]
+  },
+  {
+    "conversations": [
+      {"from": "human",     "value": "How do I share state between two Tokio tasks?"},
+      {"from": "gpt",       "value": "Wrap the state in `Arc<Mutex<T>>` (or `Arc<RwLock<T>>` for read-heavy workloads) and clone the `Arc` into each task. For single-owner state that needs to be moved between tasks, use a `tokio::sync::oneshot` or `mpsc` channel."}
+    ]
+  }
+]

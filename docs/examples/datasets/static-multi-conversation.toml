@@ -1,0 +1,53 @@
+# Static multi-message dataset (M6 static_multi mode)
+# ======================================================
+#
+# Each item has a `messages` array but NO `follow_ups`. The
+# executor sends the full `messages` array in ONE request per
+# item. There is no session — every request is independent.
+#
+# Use this when you want to benchmark the model with realistic
+# multi-turn SHAPED prompts (e.g. a system prompt + few-shot
+# examples + a real question) but you don't care about the
+# back-and-forth latency of an actual conversation.
+#
+# Invoke with:
+#   power_test run --config static-multi-conversation.toml \
+#                  --target <URL> --api <KIND> --model <NAME> \
+#                  --rps 5 --duration 60 \
+#                  --tag "static-multi-5rps-60s"
+
+# ---- Item 1: system + few-shot + real question ----
+[[items]]
+name = "fewshot-translation"
+tags = ["few-shot", "translation"]
+weight = 1.0
+
+messages = [
+    { role = "system",    content = "You are a translator from English to French. Reply with only the French translation." },
+    { role = "user",      content = "Hello, how are you?" },
+    { role = "assistant", content = "Bonjour, comment allez-vous ?" },
+    { role = "user",      content = "I am fine, thank you." },
+    { role = "assistant", content = "Je vais bien, merci." },
+    { role = "user",      content = "Where is the train station?" },
+]
+
+# ---- Item 2: long system prompt + single user question ----
+[[items]]
+name = "long-system-qa"
+tags = ["long-system"]
+weight = 1.0
+
+messages = [
+    { role = "system", content = "You are a senior staff engineer at a payments company. Answer the following question as if reviewing a pull request: cite the relevant principle, point out the bug, and suggest a fix in 1-2 sentences. Be terse." },
+    { role = "user",   content = "Is it safe to retry this database transaction without an idempotency key if the previous attempt timed out without a response?" },
+]
+
+# ---- Item 3: short, code-lookup style ----
+[[items]]
+name = "code-lookup"
+tags = ["code", "short"]
+weight = 1.0
+
+messages = [
+    { role = "user", content = "What does the `?` operator do in Rust?" },
+]

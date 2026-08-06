@@ -55,6 +55,48 @@ blank lines skipped, malformed lines skipped with a warning:
 in the HTML report only; it does not affect the actual request
 body. If you don't know it, omit it (`{"prompt": "..."}` is fine).
 
+### Custom TOML profile (M6)
+
+For multi-turn conversations, the custom dataset path can be a
+TOML file (not JSONL). The loader auto-detects by extension and
+inspects the file shape to decide whether the dataset is
+`single` (one prompt per item), `static_multi` (one
+`messages[]` per item, no follow-ups), or `dynamic_multi`
+(`messages[]` + optional `follow_ups[]`). Mixing modes in one
+file is a hard error.
+
+`docs/examples/datasets/multi-turn-conversation.toml`:
+```toml
+# dynamic_multi: each item is a chain of serial turns.
+# K parallel sessions = --concurrency.
+[[items]]
+name = "weather-followup"
+messages = [
+    { role = "system", content = "You are a terse weather assistant." },
+    { role = "user",   content = "What's the weather in Tokyo?" },
+]
+follow_ups = [
+    "And in Osaka?",
+    "Which is warmer?",
+]
+```
+
+`docs/examples/datasets/static-multi-conversation.toml` shows
+the static_multi variant: every item is one request with a
+full `messages[]`, no `follow_ups`, no session.
+
+Invoke both with the regular custom path flag:
+```powershell
+& power_test run --dataset custom `
+    --custom-path docs/examples/datasets/multi-turn-conversation.toml `
+    --rps 5 --duration 60 --concurrency 4 ...
+```
+
+The summary's `prompt cache` section is the headline signal
+for dynamic_multi: turn 1 should be a miss, turn 2+ should be
+~100% hit. The `session_count` / `session_turn_total` /
+`session_dropped` lines tell you how the pool behaved.
+
 ## Picking a strategy
 
 For multi-prompt datasets:

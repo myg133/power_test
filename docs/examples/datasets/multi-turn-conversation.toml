@@ -1,0 +1,79 @@
+# Multi-turn conversation dataset (M6 dynamic_multi mode)
+# ==========================================================
+#
+# Each item defines a serial conversation: a seed `messages`
+# array (turn 1) plus an optional `follow_ups` array (turns
+# 2..N). The session pool runs K (= --concurrency) parallel
+# sessions, each driving its own chain of turns strictly
+# serially. Turn N+1 sees the grown messages (everything from
+# turn 1 to N) plus the next follow_up.
+#
+# Use this when you want to measure multi-turn latency /
+# throughput / cache behavior — e.g. how does the endpoint
+# behave when the prior turn's transcript is part of the next
+# prompt's prefix?
+#
+# Invoke with:
+#   power_test run --config multi-turn-conversation.toml \
+#                  --target <URL> --api <KIND> --model <NAME> \
+#                  --rps 5 --duration 60 --concurrency 4 \
+#                  --tag "multi-turn-5rps-60s"
+#
+# The dataset loader auto-detects the mode from the file
+# shape. Mixing dynamic_multi and static_multi items in the
+# same file is a hard error (mixed-mode fail-fast).
+
+# ---- Conversation 1: 3 turns, system prompt stays cached ----
+[[items]]
+# `name` and `tags` are free-form, used in reports and
+# filters. `weight` controls pick probability when
+# --request-strategy is random (default 1.0).
+name = "weather-followup"
+tags = ["short", "english"]
+weight = 1.0
+
+# Seed = the messages sent on turn 1.
+messages = [
+    { role = "system",    content = "You are a terse weather assistant. Reply in one short sentence." },
+    { role = "user",      content = "What's the weather in Tokyo right now?" },
+]
+
+# Each entry in follow_ups is sent as a new user turn after
+# the prior assistant turn is appended to the session. The
+# model sees the full growing history.
+follow_ups = [
+    "And in Osaka?",
+    "Which is warmer?",
+]
+
+# ---- Conversation 2: 4 turns, longer assistant answer ----
+[[items]]
+name = "math-tutor"
+tags = ["math", "reasoning"]
+weight = 1.0
+
+messages = [
+    { role = "system",    content = "You are a patient math tutor. Show your work briefly." },
+    { role = "user",      content = "Solve x^2 - 5x + 6 = 0." },
+]
+
+follow_ups = [
+    "How did you factor it?",
+    "What's the discriminant in general?",
+    "Solve x^2 - 7x + 12 = 0 too.",
+]
+
+# ---- Conversation 3: 2 turns, single follow-up ----
+[[items]]
+name = "code-review"
+tags = ["code", "english"]
+weight = 1.0
+
+messages = [
+    { role = "system",    content = "You are a senior Rust reviewer. Be terse." },
+    { role = "user",      content = "Review this:\n\nfn main() { let mut v = vec![]; for i in 0..10 { v.push(i); } println!(\"{:?}\", v); }" },
+]
+
+follow_ups = [
+    "How would you rewrite it idiomatically?",
+]

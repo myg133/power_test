@@ -25,15 +25,46 @@ materially change the test (otherwise pick the obvious default).
   (e.g. `https://api.openai.com/v1/chat/completions`).
 - **`--api`**: `openai` (default), `anthropic`, or `raw` (any HTTP).
 - **`--model`**: e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20240620`.
+- **`--model-alias`** (M6g, optional): override the *history
+  grouping key* for this run. Use when the real model name
+  carries a date suffix (`DeepSeek-V4-Flash-20260115`,
+  `claude-3-haiku-20240229`) but you want every snapshot of the
+  same underlying model to land in the same
+  `<history>/<alias>/` subdirectory and show up in each
+  other's compare-with dropdown. When omitted, the model name
+  is used as the group key.
 - **`--api-key`** (or `OPENAI_API_KEY` env var): bearer / `x-api-key`.
   Local endpoints (ollama, vllm with no auth) may skip this.
 - **`--rps`** + **`--duration`**: how hard and how long.
 - **`--pattern`**: `constant` (default) / `ramp` / `spike` / `soak`.
 - **`--dataset`**: `literal` / `token-budget` / `built-in` /
-  `sharegpt` / `custom`. Default: `literal` with a built-in prompt.
+  `sharegpt` / `custom`. Default: `literal` with a built-in
+  prompt. For M6 multi-turn conversations, use
+  `--dataset custom --custom-path <file.toml>` with the TOML
+  profile format (see `references/patterns-and-datasets.md`).
 
 If the user already has a TOML config, prefer `--config <path>` over
 repeating every flag (CLI flags still win over TOML).
+
+## Templates
+
+The repo ships copy-paste-ready templates in
+`D:\MyCodes\Rust\power_test\docs\examples\`:
+
+- `power_test.toml` — full config template (every field, every
+  pattern kind, every dataset kind, commented).
+- `datasets/multi-turn-conversation.toml` — M6 dynamic_multi
+  (3 example conversations with follow_ups).
+- `datasets/static-multi-conversation.toml` — M6 static_multi
+  (3 example multi-message requests, no follow_ups).
+- `datasets/single-turn-prompts.json` / `.jsonl` — custom
+  dataset format.
+- `datasets/sharegpt-mini.json` — ShareGPT format.
+
+When the user wants to set up a recurring test (e.g. nightly
+benchmark, regression suite), point them at the templates
+first — copying `power_test.toml` to `./power_test.toml` and
+editing is faster than `--help`.
 
 ## Procedure
 
@@ -278,6 +309,42 @@ $runB = & D:\MyCodes\Rust\power_test\target\release\power_test.exe run `
     --raw-body-file D:\tmp\body.json `
     --raw-content-type application/json `
     --rps 10 --duration 30
+```
+
+### 7. Multi-turn conversation (M6 dynamic_multi)
+
+`docs/examples/datasets/multi-turn-conversation.toml` defines
+3 example conversations with follow-ups. Each session runs
+its own chain of serial turns; K parallel sessions equal
+`--concurrency`.
+
+```powershell
+& D:\MyCodes\Rust\power_test\target\release\power_test.exe run `
+    --target http://192.168.31.101:8317/v1/chat/completions `
+    --api-key sk-myg133-1 `
+    --model MiniMax-M3 `
+    --dataset custom --custom-path D:\MyCodes\Rust\power_test\docs\examples\datasets\multi-turn-conversation.toml `
+    --rps 5 --duration 60 --concurrency 4 `
+    --tag "multiturn-5rps-60s"
+```
+
+The summary's `prompt cache` section is the headline metric
+here: turn 1 should be a miss, turn 2+ should be ~100% hit if
+the endpoint's KV cache is wired up correctly.
+
+### 8. Group dated snapshots under one alias (M6g)
+
+`--model-alias` lets dated model snapshots share a history
+subdirectory and a compare-with group. Without it,
+`DeepSeek-V4-Flash-20260115` and `DeepSeek-V4-Flash-20260201`
+end up in separate folders and never see each other in
+`compare`.
+
+```powershell
+# Both runs land in <history>/DeepSeek-V4-Flash/ and
+# show up in each other's compare-with dropdown.
+& D:\...\power_test.exe run --model DeepSeek-V4-Flash-20260115 --model-alias DeepSeek-V4-Flash ...
+& D:\...\power_test.exe run --model DeepSeek-V4-Flash-20260201 --model-alias DeepSeek-V4-Flash ...
 ```
 
 ## See also

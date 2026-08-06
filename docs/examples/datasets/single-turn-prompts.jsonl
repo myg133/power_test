@@ -1,0 +1,9 @@
+{"prompt": "What is the capital of France?", "estimated_prompt_tokens": 7}
+{"prompt": "Translate 'good morning' to Japanese.", "estimated_prompt_tokens": 7}
+{"prompt": "Write a haiku about a rainy Tuesday.", "estimated_prompt_tokens": 8}
+{"prompt": "What is 17 * 23?", "estimated_prompt_tokens": 4}
+{"prompt": "Summarize the plot of Hamlet in two sentences.", "estimated_prompt_tokens": 9}
+
+# Lines starting with `#` are comments — they are skipped.
+# Blank lines are also skipped.
+# Malformed lines are skipped with a warning (not a hard error).
