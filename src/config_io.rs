@@ -28,6 +28,9 @@ pub struct TomlConfig {
     pub api: Option<String>,
     /// Model name sent in the request body.
     pub model: Option<String>,
+    /// M6g: alias for the model, used to group runs in the
+    /// history directory. CLI `--model-alias` overrides this.
+    pub model_alias: Option<String>,
     /// Target RPS for `constant` / `soak` / `spike` (baseline).
     pub rps: Option<f64>,
     /// Run duration in seconds.
@@ -217,6 +220,11 @@ pub fn merge_into_run_args(base: TomlConfig, cli: &mut RunArgs) {
         }
     }
 
+    // ---- model_alias ----
+    if cli.model_alias.is_none() {
+        cli.model_alias = base.model_alias;
+    }
+
     // ---- rps ----
     if approx_eq(cli.rps, 10.0) {
         if let Some(r) = base.rps {
@@ -388,6 +396,7 @@ pub fn print_config(cli: &RunArgs) -> String {
     cfg.target = cli.target.clone();
     cfg.api = Some(cli.api.clone());
     cfg.model = Some(cli.model.clone());
+    cfg.model_alias = cli.model_alias.clone();
     cfg.rps = Some(cli.rps);
     cfg.duration = Some(cli.duration);
     cfg.max_tokens = Some(cli.max_tokens);
@@ -562,6 +571,7 @@ kind = "built-in"
             sharegpt_path: None,
             custom_path: None,
             request_strategy: "random".into(),
+            model_alias: None,
             raw_body_file: None,
             raw_content_type: None,
             tui: false,
@@ -602,6 +612,41 @@ kind = "built-in"
         assert_eq!(cli.target.as_deref(), Some("http://override.example/"));
         assert_eq!(cli.duration, 999);
         assert!((cli.rps - 42.0).abs() < 1e-9);
+    }
+
+    /// M6g: when the TOML sets `model_alias` and the CLI does
+    /// not, the TOML value should populate the CLI's
+    /// `model_alias`. CLI overrides always win.
+    #[test]
+    fn merge_model_alias_from_toml() {
+        let mut cli = fresh_args();
+        let toml = TomlConfig {
+            model_alias: Some("DeepSeek-V4-Flash".into()),
+            ..Default::default()
+        };
+        merge_into_run_args(toml, &mut cli);
+        assert_eq!(cli.model_alias.as_deref(), Some("DeepSeek-V4-Flash"));
+
+        // CLI override wins.
+        let mut cli2 = fresh_args();
+        cli2.model_alias = Some("OtherAlias".into());
+        let toml2 = TomlConfig {
+            model_alias: Some("DeepSeek-V4-Flash".into()),
+            ..Default::default()
+        };
+        merge_into_run_args(toml2, &mut cli2);
+        assert_eq!(cli2.model_alias.as_deref(), Some("OtherAlias"));
+    }
+
+    /// M6g: `--print-config` should round-trip a configured
+    /// alias back to TOML output.
+    #[test]
+    fn print_config_includes_model_alias() {
+        let mut cli = fresh_args();
+        cli.model_alias = Some("MyAlias".into());
+        let out = print_config(&cli);
+        assert!(out.contains("model_alias"), "missing model_alias: {out}");
+        assert!(out.contains("MyAlias"));
     }
 
     #[test]

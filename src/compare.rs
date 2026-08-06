@@ -168,6 +168,21 @@ fn shape_warnings(a: &RunConfig, b: &RunConfig) -> Vec<String> {
     if a.model != b.model {
         w.push(format!("different models: '{}' vs '{}'", a.model, b.model));
     }
+    // M6g: also warn when the alias (group key) differs —
+    // different aliases imply these runs are in different
+    // history subdirectories and were never meant to be
+    // compared. This is the inverse of the compare-with
+    // dropdown's filter: if list_runs_by_alias wouldn't
+    // return the other run, the diff is probably
+    // meaningless.
+    let a_key = crate::storage::effective_group_key(&a.model, a.model_alias.as_deref());
+    let b_key = crate::storage::effective_group_key(&b.model, b.model_alias.as_deref());
+    if a_key != b_key {
+        w.push(format!(
+            "different model alias: '{}' vs '{}' (runs are in different history subdirectories)",
+            a_key, b_key
+        ));
+    }
     if pattern_kind(&a.pattern) != pattern_kind(&b.pattern) {
         w.push(format!(
             "different load patterns: '{}' vs '{}'",
@@ -1051,6 +1066,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             raw_body_file: None,
             raw_content_type: None,
+            model_alias: None,
         }
     }
 

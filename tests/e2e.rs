@@ -45,6 +45,7 @@ fn build_config(target: String, duration_secs: u64) -> RunConfig {
         started_at: chrono::Utc::now(),
         raw_body_file: None,
         raw_content_type: None,
+        model_alias: None,
     }
 }
 

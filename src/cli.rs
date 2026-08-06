@@ -64,6 +64,17 @@ pub struct RunArgs {
     #[arg(long, default_value = "gpt-3.5-turbo")]
     pub model: String,
 
+    /// M6g: alias for the model, used to group runs in the
+    /// history directory and the compare-with dropdown.
+    /// Useful when the actual model name carries a date
+    /// suffix (e.g. `DeepSeek-V4-Flash-20260115`) but you
+    /// want all snapshots of `DeepSeek-V4-Flash` to land
+    /// in the same `<history>/<alias>/` subdirectory.
+    /// When omitted, the model name is used as the group
+    /// key (M6f behavior).
+    #[arg(long, value_name = "NAME")]
+    pub model_alias: Option<String>,
+
     /// Literal prompt text. Implies `--dataset literal` unless
     /// `--dataset` is set explicitly. Defaults to a built-in short
     /// prompt if neither `--prompt` nor `--prompt-tokens` is set.
@@ -417,6 +428,7 @@ impl RunArgs {
             started_at: chrono::Utc::now(),
             raw_body_file: self.raw_body_file.clone(),
             raw_content_type: self.raw_content_type.clone(),
+            model_alias: self.model_alias.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         })
     }
 
@@ -477,6 +489,7 @@ mod tests {
             rps: 10.0,
             duration: 5,
             model: "m".into(),
+            model_alias: None,
             prompt: None,
             prompt_tokens: None,
             max_tokens: 32,

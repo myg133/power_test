@@ -330,6 +330,18 @@ pub struct RunConfig {
     /// Content-Type for the raw body. Defaults to `application/json`.
     #[serde(default)]
     pub raw_content_type: Option<String>,
+
+    // -------- M6g: model alias --------
+    /// M6g: an optional alias used to group runs in the history
+    /// directory and the compare-with dropdown. When set, runs
+    /// with different `--model` strings (e.g. dated snapshots
+    /// like `DeepSeek-V4-Flash-20260115`) can share the same
+    /// alias (`DeepSeek-V4-Flash`) and end up in the same
+    /// `<root>/<alias>/` subdirectory. When `None`, the actual
+    /// `model` is used as the group key. `#[serde(default)]`
+    /// so old `config.json` files (pre-M6g) still load.
+    #[serde(default)]
+    pub model_alias: Option<String>,
 }
 
 impl RunConfig {
@@ -512,6 +524,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             raw_body_file: None,
             raw_content_type: None,
+            model_alias: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RunConfig = serde_json::from_str(&json).unwrap();

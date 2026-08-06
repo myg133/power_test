@@ -167,6 +167,7 @@ pub fn render_html_with_compare(
         <tr><td>Dataset</td><td><code>{dataset_name}</code> · strategy <code>{strategy}</code>{dataset_detail}</td></tr>
         <tr><td>Prompt tokens</td><td>{prompt_count} prompts · min <strong>{prompt_min}</strong> · mean <strong>{prompt_mean:.1}</strong> · max <strong>{prompt_max}</strong></td></tr>
         <tr><td>Concurrency</td><td>{concurrency}</td></tr>
+        {model_alias_row}
       </tbody>
     </table>
 
@@ -325,7 +326,22 @@ pub fn render_html_with_compare(
         prompt_mean = cfg.prompt_distribution.mean,
         prompt_max = cfg.prompt_distribution.max,
         concurrency = cfg.concurrency,
+        model_alias_row = build_model_alias_row(cfg),
     )
+}
+
+/// M6g: when a `--model-alias` was set, render an extra row
+/// in the Configuration table showing it. The alias is what
+/// groups this run with its siblings in the history
+/// directory; the actual model name is the row above.
+fn build_model_alias_row(cfg: &RunConfig) -> String {
+    match &cfg.model_alias {
+        Some(alias) if !alias.is_empty() => format!(
+            r#"<tr><td>Model alias</td><td><code>{}</code> <span style="color:var(--muted);font-size:12px;">(groups history + compare)</span></td></tr>"#,
+            html_escape(alias)
+        ),
+        _ => String::new(),
+    }
 }
 
 fn fmt_ms_opt(us: Option<u64>) -> String {
@@ -570,6 +586,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             raw_body_file: None,
             raw_content_type: None,
+            model_alias: None,
         }
     }
 

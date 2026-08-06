@@ -40,6 +40,12 @@ pub struct HistoryEntry {
     /// the flat layout for those entries.
     #[serde(default)]
     pub model: Option<String>,
+    /// M6g: alias for the model. When set, the run lives under
+    /// `<root>/<alias>/<run_id>/` and the compare-with dropdown
+    /// only lists other runs of the same alias. `Option` for
+    /// back-compat with M6f index files (no alias field).
+    #[serde(default)]
+    pub model_alias: Option<String>,
     pub rps: f64,
     pub duration_secs: u64,
     pub status: RunStatus,
@@ -78,10 +84,27 @@ fn sanitize_model_dir(model: &str) -> String {
     out
 }
 
-/// Compute the on-disk path for a run: `<root>/<model>/<run_id>/`.
+/// Compute the on-disk path for a run: `<root>/<group_key>/<run_id>/`.
 /// Pure path math — no I/O.
-pub fn run_dir(root: &Path, model: &str, run_id: &str) -> PathBuf {
-    root.join(sanitize_model_dir(model)).join(run_id)
+///
+/// `group_key` is whatever the caller chose — typically the
+/// effective group key from [`effective_group_key`]. We sanitize
+/// the string so model / alias names with `/` `?` `:` etc. are
+/// safe to use as a directory component.
+pub fn run_dir(root: &Path, group_key: &str, run_id: &str) -> PathBuf {
+    root.join(sanitize_model_dir(group_key)).join(run_id)
+}
+
+/// M6g: resolve the group key for a run. The alias wins when
+/// present and non-empty; otherwise the model name is used.
+/// This is the single source of truth for "which subdirectory
+/// does this run belong in" and "which other runs is this
+/// comparable with".
+pub fn effective_group_key<'a>(model: &'a str, alias: Option<&'a str>) -> &'a str {
+    match alias {
+        Some(a) if !a.trim().is_empty() => a,
+        _ => model,
+    }
 }
 
 /// Save a run's artifacts to `<root>/<model>/<run_id>/`. Writes
@@ -97,7 +120,10 @@ pub fn save_run(
     status: RunStatus,
 ) -> Result<HistoryEntry> {
     ensure_history_dir(root)?;
-    let dir = run_dir(root, &config.model, run_id);
+    // M6g: group by alias (if set) so dated snapshots of the
+    // same underlying model land in the same subdirectory.
+    let group_key = effective_group_key(&config.model, config.model_alias.as_deref());
+    let dir = run_dir(root, group_key, run_id);
     fs::create_dir_all(&dir).map_err(|e| crate::error::Error::io_at(&dir, e))?;
 
     let config_json = serde_json::to_string_pretty(config)?;
@@ -119,6 +145,7 @@ pub fn save_run(
         timestamp: config.started_at,
         target: config.target.clone(),
         model: Some(config.model.clone()),
+        model_alias: config.model_alias.clone(),
         rps: config.target_rps,
         duration_secs: config.duration_secs,
         status,
@@ -200,6 +227,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<HistoryEntry>> {
                     } else {
                         cfg.model
                     }),
+                    model_alias: cfg.model_alias,
                     rps: cfg.target_rps,
                     duration_secs: cfg.duration_secs,
                     status: RunStatus::Completed,
@@ -223,26 +251,34 @@ pub fn load_config(dir: &Path) -> Result<RunConfig> {
 
 /// Load a run by id from the history root. Returns `(config, metrics_json_value)`.
 ///
-/// M6f: with the model-grouped layout
-/// (`<root>/<model>/<run_id>/`), we look up the run's `model` in
-/// the global `index.json` first, then read from the
-/// model-keyed subdirectory. As a fallback for pre-M6f runs (flat
-/// `<root>/<run_id>/`), we also try the old path with a tracing
-/// warning. The flat fallback is the only reason we don't error
-/// on missing index.json — we need to keep the old runs readable.
+/// M6g: the directory layout is `<root>/<group_key>/<run_id>/`
+/// where `group_key` is the alias (when set) or the model
+/// name. We look up the run's `model` and `model_alias` in the
+/// global `index.json` first, then read from the
+/// group-keyed subdirectory. As a fallback for pre-M6f runs
+/// (flat `<root>/<run_id>/`), we also try the old path with a
+/// tracing warning. The flat fallback is the only reason we
+/// don't error on missing index.json — we need to keep the old
+/// runs readable.
 pub fn load_run(root: &Path, run_id: &str) -> Result<(RunConfig, serde_json::Value)> {
-    // Preferred path: use the index to find the run's model.
+    // Preferred path: use the index to find the run's
+    // effective group key.
     if let Some(entry) = lookup_index(root, run_id) {
-        if let Some(model) = &entry.model {
-            let dir = run_dir(root, model, run_id);
+        let group_key = effective_group_key(
+            entry.model.as_deref().unwrap_or(""),
+            entry.model_alias.as_deref(),
+        );
+        if !group_key.is_empty() {
+            let dir = run_dir(root, group_key, run_id);
             if dir.is_dir() {
                 return load_run_from(&dir);
             }
-            // Index says model=X but the directory doesn't exist
-            // — could be a corrupt run or a pre-migration state.
-            // Fall through to the flat-layout fallback below.
+            // Index says group_key=X but the directory doesn't
+            // exist — could be a corrupt run or a
+            // pre-migration state. Fall through to the
+            // flat-layout fallback below.
             tracing::warn!(
-                "index.json lists run_id={run_id} under model={model:?} but {} doesn't exist; trying flat layout",
+                "index.json lists run_id={run_id} under group_key={group_key:?} but {} doesn't exist; trying flat layout",
                 dir.display()
             );
         }
@@ -301,9 +337,10 @@ pub fn list_runs_by_target(
 /// what the user wants. Newest first, excluding the run
 /// itself when `exclude_run_id` is `Some`.
 ///
-/// Returns an empty list if the index has no entries with the
-/// given model (e.g. for a model that has been removed from
-/// the config since the run was saved).
+/// Note: M6g added `list_runs_by_alias` for the new
+/// alias-aware grouping. This function filters on the literal
+/// `model` field regardless of alias; it's useful for code
+/// that wants "strict same model" semantics.
 pub fn list_runs_by_model(
     root: &Path,
     model: &str,
@@ -313,6 +350,37 @@ pub fn list_runs_by_model(
     let mut filtered: Vec<HistoryEntry> = all
         .into_iter()
         .filter(|e| e.model.as_deref() == Some(model))
+        .filter(|e| exclude_run_id.map_or(true, |x| e.run_id != x))
+        .collect();
+    filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(filtered)
+}
+
+/// M6g: list runs that share the same `group_key` — the
+/// alias (if set) or the model name. This is the new
+/// default for the compare-with dropdown: two runs of
+/// `DeepSeek-V4-Flash-20260115` and
+/// `DeepSeek-V4-Flash-20260201` with `--model-alias
+/// DeepSeek-V4-Flash` group together.
+///
+/// Falls back to filtering on `model` when an entry has no
+/// `model_alias`, so M6f runs (pre-alias) still get included
+/// in a query for their own model name.
+pub fn list_runs_by_alias(
+    root: &Path,
+    group_key: &str,
+    exclude_run_id: Option<&str>,
+) -> Result<Vec<HistoryEntry>> {
+    let all = list_runs(root)?;
+    let mut filtered: Vec<HistoryEntry> = all
+        .into_iter()
+        .filter(|e| {
+            let e_key = effective_group_key(
+                e.model.as_deref().unwrap_or(""),
+                e.model_alias.as_deref(),
+            );
+            e_key == group_key
+        })
         .filter(|e| exclude_run_id.map_or(true, |x| e.run_id != x))
         .collect();
     filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -384,6 +452,7 @@ mod tests {
             started_at: Utc::now(),
             raw_body_file: None,
             raw_content_type: None,
+            model_alias: None,
         }
     }
 
@@ -692,5 +761,144 @@ mod tests {
         let only_g = list_runs_by_model(root, "gpt-3.5-turbo", None).unwrap();
         assert_eq!(only_g.len(), 1);
         assert_eq!(only_g[0].run_id, "g-1");
+    }
+
+    // ---- M6g: model alias ----
+
+    /// M6g: alias wins when present, model is the fallback.
+    #[test]
+    fn effective_group_key_prefers_alias() {
+        assert_eq!(effective_group_key("m", None), "m");
+        assert_eq!(effective_group_key("m", Some("")), "m");
+        assert_eq!(effective_group_key("m", Some("   ")), "m");
+        assert_eq!(effective_group_key("m", Some("a")), "a");
+        assert_eq!(
+            effective_group_key("DeepSeek-V4-Flash-20260115", Some("DeepSeek-V4-Flash")),
+            "DeepSeek-V4-Flash"
+        );
+    }
+
+    /// M6g: two runs with different model names but the same
+    /// alias must land in the same subdirectory and the same
+    /// compare group.
+    #[test]
+    fn alias_groups_dated_snapshots_together() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Two dated snapshots of the same underlying model,
+        // both with the same alias.
+        for (rid, model, alias) in [
+            ("jan", "DeepSeek-V4-Flash-20260115", "DeepSeek-V4-Flash"),
+            ("feb", "DeepSeek-V4-Flash-20260201", "DeepSeek-V4-Flash"),
+        ] {
+            let mut cfg = make_config(rid);
+            cfg.model = model.into();
+            cfg.model_alias = Some(alias.into());
+            save_run(
+                root,
+                rid,
+                &cfg,
+                &make_agg(),
+                "summary",
+                "<html></html>",
+                RunStatus::Completed,
+            )
+            .unwrap();
+        }
+        // Both files should be under the alias directory,
+        // not under their respective dated model dirs.
+        let alias_dir = root.join("DeepSeek-V4-Flash");
+        assert!(alias_dir.join("jan").is_dir());
+        assert!(alias_dir.join("feb").is_dir());
+        // The dated model dirs must NOT exist as siblings.
+        assert!(!root.join("DeepSeek-V4-Flash-20260115").exists());
+        assert!(!root.join("DeepSeek-V4-Flash-20260201").exists());
+
+        // `list_runs_by_alias` returns both.
+        let same_alias = list_runs_by_alias(root, "DeepSeek-V4-Flash", None).unwrap();
+        assert_eq!(same_alias.len(), 2);
+
+        // `list_runs_by_model` (strict) returns each separately.
+        let jan_only = list_runs_by_model(root, "DeepSeek-V4-Flash-20260115", None).unwrap();
+        assert_eq!(jan_only.len(), 1);
+        let feb_only = list_runs_by_model(root, "DeepSeek-V4-Flash-20260201", None).unwrap();
+        assert_eq!(feb_only.len(), 1);
+    }
+
+    /// M6g: when a run has no alias, `list_runs_by_alias` with
+    /// its model name still finds it (the model becomes the
+    /// implicit group key). This is the M6f back-compat path.
+    #[test]
+    fn list_runs_by_alias_falls_back_to_model_when_no_alias() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut cfg = make_config("legacy");
+        cfg.model = "gpt-3.5-turbo".into();
+        // No alias set.
+        save_run(
+            root,
+            "legacy",
+            &cfg,
+            &make_agg(),
+            "summary",
+            "<html></html>",
+            RunStatus::Completed,
+        )
+        .unwrap();
+        // Querying by the model string still returns the run.
+        let hits = list_runs_by_alias(root, "gpt-3.5-turbo", None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].run_id, "legacy");
+    }
+
+    /// M6g: alias round-trips through `index.json`.
+    #[test]
+    fn alias_persists_in_index() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut cfg = make_config("aliased");
+        cfg.model_alias = Some("MyAlias".into());
+        save_run(
+            root,
+            "aliased",
+            &cfg,
+            &make_agg(),
+            "summary",
+            "<html></html>",
+            RunStatus::Completed,
+        )
+        .unwrap();
+        let entry = lookup_index(root, "aliased").unwrap();
+        assert_eq!(entry.model_alias.as_deref(), Some("MyAlias"));
+        assert_eq!(entry.model.as_deref(), Some("gpt-3.5-turbo"));
+    }
+
+    /// M6g: `load_run` resolves the directory through the
+    /// alias-keyed subdirectory, not the model name.
+    #[test]
+    fn load_run_uses_alias_subdirectory() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut cfg = make_config("aliased-load");
+        cfg.model = "MiniMax-M3-20260101".into();
+        cfg.model_alias = Some("MiniMax-M3".into());
+        save_run(
+            root,
+            "aliased-load",
+            &cfg,
+            &make_agg(),
+            "summary",
+            "<html></html>",
+            RunStatus::Completed,
+        )
+        .unwrap();
+        // File should be at the alias path, not the model path.
+        assert!(root.join("MiniMax-M3").join("aliased-load").is_dir());
+        assert!(!root.join("MiniMax-M3-20260101").join("aliased-load").exists());
+
+        // `load_run` should find it via the index's alias.
+        let (loaded, _metrics) = load_run(root, "aliased-load").unwrap();
+        assert_eq!(loaded.model, "MiniMax-M3-20260101");
+        assert_eq!(loaded.model_alias.as_deref(), Some("MiniMax-M3"));
     }
 }

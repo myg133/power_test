@@ -20,6 +20,9 @@ pub fn render_summary(cfg: &RunConfig, agg: &MetricsAggregator, interrupted: boo
     let _ = writeln!(s, "started: {}", cfg.started_at.to_rfc3339());
     let _ = writeln!(s, "target:  {}", cfg.target);
     let _ = writeln!(s, "model:   {}", cfg.model);
+    if let Some(alias) = &cfg.model_alias {
+        let _ = writeln!(s, "alias:   {}", alias);
+    }
     let _ = writeln!(s, "api:     {}", cfg.api.as_str());
     let _ = writeln!(
         s,
@@ -244,6 +247,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             raw_body_file: None,
             raw_content_type: None,
+            model_alias: None,
         }
     }
 
