@@ -196,7 +196,10 @@ pub async fn run_with_cancel(opts: RunOptions, cancel: Arc<Notify>) -> Result<Ru
 
     // Extract the aggregator. There should be no other references at this
     // point (scheduler joined, all workers done). Use `try_unwrap` and fall
-    // back to a clone if necessary.
+    // back to a clone if necessary. The fallback also calls
+    // `merge_counters_from` to carry over scheduled / skipped /
+    // session_count / cache totals — `push_record_clone` alone
+    // doesn't preserve those (M6h fix).
     let aggregator = match Arc::try_unwrap(agg) {
         Ok(mutex) => mutex.into_inner().unwrap_or_else(|_| MetricsAggregator::new()),
         Err(arc) => {
@@ -206,6 +209,7 @@ pub async fn run_with_cancel(opts: RunOptions, cancel: Arc<Notify>) -> Result<Ru
             for r in guard.per_request() {
                 fresh.push_record_clone(r);
             }
+            fresh.merge_counters_from(&guard);
             fresh
         }
     };

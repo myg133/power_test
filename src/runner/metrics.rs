@@ -482,6 +482,41 @@ impl MetricsAggregator {
     pub fn total_prompt_tokens(&self) -> u64 {
         self.per_request.iter().map(|r| r.prompt_tokens as u64).sum()
     }
+
+    /// M6h: copy the run-level counters that
+    /// `push_record_clone` does NOT already cover, from
+    /// `other` into `self`. Used by the executor's
+    /// `Arc::try_unwrap` fallback path: when the executor
+    /// can't take ownership of the aggregator (e.g. the TUI
+    /// holds a shared reference), it builds a fresh
+    /// aggregator and replays per-request records via
+    /// `push_record_clone`. That replay covers latency /
+    /// TTFT / ITL / TPS / cache / status_codes /
+    /// `session_turn_total` (via `accumulate_cache` for the
+    /// cache fields and the per-record branch for
+    /// `session_turn_total`).
+    ///
+    /// What `push_record_clone` does NOT cover, and what
+    /// `merge_counters_from` must therefore add:
+    ///
+    /// - `scheduled` — incremented by `record_scheduled` (one
+    ///   per scheduler tick), never by `push_record_clone`.
+    /// - `skipped` — incremented by `record_skipped` when
+    ///   the semaphore is exhausted; not per-request.
+    /// - `session_count` / `session_dropped` — incremented
+    ///   by `record_session_finished` (one per session
+    ///   lifetime, not per turn).
+    ///
+    /// Before this helper existed, a real run reported
+    /// `scheduled: 0` / `session_count: 0` in
+    /// `metrics.json` even when the run actually scheduled 60
+    /// ticks and completed 8 sessions.
+    pub fn merge_counters_from(&mut self, other: &Self) {
+        self.scheduled += other.scheduled;
+        self.skipped += other.skipped;
+        self.session_count += other.session_count;
+        self.session_dropped += other.session_dropped;
+    }
 }
 
 impl Default for MetricsAggregator {
@@ -802,5 +837,61 @@ mod tests {
         assert_eq!(c.cache_creation_turn2plus, 0);
         assert_eq!(c.cache_hit_turn1, 0);
         assert_eq!(c.cache_hit_turn2plus, 100);
+    }
+
+    /// M6h: `merge_counters_from` is the executor's fallback
+    /// path. Without it, a real run reported
+    /// `scheduled: 0` / `session_count: 0` in `metrics.json`
+    /// even when the run actually scheduled 60 ticks and
+    /// completed 8 sessions. The fallback builds a fresh
+    /// aggregator from per-request records (which already
+    /// cover latency / TTFT / ITL / TPS / cache / status_codes
+    /// via `push_record_clone`) and then has to layer the
+    /// bookkeeping counters on top.
+    #[test]
+    fn merge_counters_from_carries_over_bookkeeping() {
+        // Build a "real" aggregator with non-zero counters.
+        let mut src = MetricsAggregator::new();
+        src.record_scheduled();
+        src.record_scheduled();
+        src.record_skipped();
+        src.record_session_finished(false);
+        src.record_session_finished(true);
+        let mut m = dummy_metrics(500_000, Some(100_000), vec![], 5);
+        m.prompt_tokens = 100;
+        m.cache_creation_input_tokens = 50;
+        m.cache_hit_input_tokens = 30;
+        src.record_completed(&m, 0, &CompletionContext::turn("s1", 1, false));
+        let mut m2 = dummy_metrics(600_000, Some(110_000), vec![], 6);
+        m2.prompt_tokens = 200;
+        m2.cache_hit_input_tokens = 180;
+        src.record_completed(&m2, 0, &CompletionContext::turn("s1", 2, true));
+
+        // Build a fresh aggregator from the same per-request
+        // records (this is the executor's fallback path).
+        let mut fresh = MetricsAggregator::new();
+        for r in src.per_request() {
+            fresh.push_record_clone(r);
+        }
+        // Before merge: counters are all 0, but per-request
+        // data is intact.
+        assert_eq!(fresh.scheduled, 0);
+        assert_eq!(fresh.session_count, 0);
+        assert_eq!(fresh.cache_creation_total, 50);
+        assert_eq!(fresh.cache_hit_total, 210);
+
+        // After merge: the bookkeeping counters that
+        // `push_record_clone` does NOT cover are carried over.
+        fresh.merge_counters_from(&src);
+        assert_eq!(fresh.scheduled, 2);
+        assert_eq!(fresh.skipped, 1);
+        assert_eq!(fresh.session_count, 2);
+        assert_eq!(fresh.session_dropped, 1);
+        // session_turn_total and cache_* are already at the
+        // correct values from push_record_clone — the merge
+        // must not double-count them.
+        assert_eq!(fresh.session_turn_total, 2);
+        assert_eq!(fresh.cache_creation_total, 50);
+        assert_eq!(fresh.cache_hit_total, 210);
     }
 }

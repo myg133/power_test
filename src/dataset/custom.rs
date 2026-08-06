@@ -148,7 +148,13 @@ fn parse_jsonl(text: &str, path: &Path) -> Result<Vec<DatasetItem>> {
 
 #[derive(Debug, Deserialize)]
 struct ProfileFile {
-    #[serde(default)]
+    /// The TOML profile table-array. Both `[[prompt]]` (the
+    /// original M6 schema) and `[[items]]` (the user-facing
+    /// name in `docs/examples/datasets/`) are accepted.
+    /// `[[items]]` reads more naturally for multi-message
+    /// conversation profiles where the entries are not
+    /// really "prompts" in the literal sense.
+    #[serde(default, alias = "items")]
     prompt: Vec<ProfileItem>,
 }
 
@@ -168,8 +174,10 @@ struct ProfileItem {
     #[serde(default)]
     follow_ups: Vec<String>,
     /// Optional sampling weight. `0` items are skipped.
+    /// `f64` so users can write `0.5` / `1.0` / `2.5` in the
+    /// TOML profile naturally.
     #[serde(default)]
-    weight: Option<u32>,
+    weight: Option<f64>,
     /// Optional tags.
     #[serde(default)]
     tags: Vec<String>,
@@ -196,7 +204,7 @@ fn parse_toml_profile(text: &str, path: &Path) -> Result<Vec<DatasetItem>> {
             format!("item-{i}")
         });
         if let Some(w) = raw.weight {
-            if w == 0 {
+            if w == 0.0 {
                 tracing::debug!("custom: skipping item {name} (weight=0)");
                 continue;
             }
@@ -431,7 +439,7 @@ tags = ["smoke"]
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].prompt, "Hello");
         assert_eq!(items[1].name.as_deref(), Some("q2"));
-        assert_eq!(items[1].weight, Some(3));
+        assert_eq!(items[1].weight, Some(3.0));
         assert_eq!(items[1].tags, vec!["smoke".to_string()]);
     }
 
@@ -479,6 +487,32 @@ follow_ups = [
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].follow_ups.len(), 2);
         assert_eq!(items[0].follow_ups[0], "Now compare to Q2.");
+    }
+
+    /// M6h: the user-facing schema name in
+    /// `docs/examples/datasets/multi-turn-conversation.toml`
+    /// is `[[items]]` (more natural for multi-message
+    /// conversation profiles). The parser must accept
+    /// `[[items]]` as an alias for the original M6
+    /// `[[prompt]]` table-array name.
+    #[test]
+    fn toml_items_alias_accepted() {
+        let body = r#"
+[[items]]
+name = "via-items-alias"
+messages = [
+  { role = "user", content = "hi" },
+]
+follow_ups = [
+  "follow up",
+]
+"#;
+        let (_d, p) = write_tmp("b.toml", body);
+        let (items, mode) = load_with_mode(&p).unwrap();
+        assert_eq!(mode, DatasetMode::DynamicMulti);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name.as_deref(), Some("via-items-alias"));
+        assert_eq!(items[0].follow_ups.len(), 1);
     }
 
     #[test]

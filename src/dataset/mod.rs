@@ -32,9 +32,11 @@ pub struct DatasetItem {
     pub prompt: String,
     /// Rough pre-flight estimate of prompt token count.
     pub estimated_prompt_tokens: u32,
-    /// Optional sampling weight. `None` or `0` items are skipped. `1`
-    /// is the default when not set.
-    pub weight: Option<u32>,
+    /// Optional sampling weight. `None` or `0` items are
+    /// skipped. `1.0` is the default when not set. `f64` so
+    /// users can write `0.5` / `1.0` / `2.5` in TOML profiles
+    /// without thinking about integer vs float.
+    pub weight: Option<f64>,
     /// Optional tags. Carried through for report grouping.
     pub tags: Vec<String>,
     /// Optional stable name. Defaults to a synthetic id.
