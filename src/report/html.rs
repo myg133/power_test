@@ -176,9 +176,9 @@ pub fn render_html_with_compare(
       <thead><tr><th>Metric</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th></tr></thead>
       <tbody>
         <tr><td>Latency (ms)</td><td>{lat_p50}</td><td>{lat_p90}</td><td>{lat_p99}</td><td>{lat_p999}</td></tr>
-        <tr><td>TTFT (ms)</td><td>{ttft_p50}</td><td>—</td><td>{ttft_p99}</td><td>—</td></tr>
-        <tr><td>ITL (ms)</td><td>{itl_p50}</td><td>—</td><td>{itl_p99}</td><td>—</td></tr>
-        <tr><td>TPS (tok/s)</td><td>{tps_p50}</td><td>—</td><td>{tps_p99}</td><td>—</td></tr>
+        <tr><td>TTFT (ms)</td><td>{ttft_p50}</td><td>{ttft_p90}</td><td>{ttft_p99}</td><td>{ttft_p999}</td></tr>
+        <tr><td>ITL (ms)</td><td>{itl_p50}</td><td>{itl_p90}</td><td>{itl_p99}</td><td>{itl_p999}</td></tr>
+        <tr><td>TPS (tok/s)</td><td>{tps_p50}</td><td>{tps_p90}</td><td>{tps_p99}</td><td>{tps_p999}</td></tr>
       </tbody>
     </table>
 
@@ -306,12 +306,28 @@ pub fn render_html_with_compare(
         lat_p90 = fmt_ms_opt(agg.percentile(HistKind::Latency, 90.0)),
         lat_p99 = fmt_ms_opt(agg.percentile(HistKind::Latency, 99.0)),
         lat_p999 = fmt_ms_opt(agg.percentile(HistKind::Latency, 99.9)),
+        // M6h: TTFT / ITL / TPS now show all 4 percentiles
+        // (p50 / p90 / p99 / p99.9) to match the Latency row
+        // and the 4-column table header. Previously these
+        // rows only had p50 + p99, with the p90 / p99.9
+        // cells hard-coded to "—" — which made readers
+        // wonder whether the data was missing.
         ttft_p50 = fmt_ms_opt(agg.percentile(HistKind::Ttft, 50.0)),
+        ttft_p90 = fmt_ms_opt(agg.percentile(HistKind::Ttft, 90.0)),
         ttft_p99 = fmt_ms_opt(agg.percentile(HistKind::Ttft, 99.0)),
-        itl_p50 = fmt_ms_opt_f64(agg.mean(HistKind::Itl)),
+        ttft_p999 = fmt_ms_opt(agg.percentile(HistKind::Ttft, 99.9)),
+        // M6h: itl_p50 used to be `mean` (an arithmetic
+        // average), but the column header says "p50" so
+        // the value is misleading. Switched to the actual
+        // p50 percentile from the ITL histogram.
+        itl_p50 = fmt_ms_opt(agg.percentile(HistKind::Itl, 50.0)),
+        itl_p90 = fmt_ms_opt(agg.percentile(HistKind::Itl, 90.0)),
         itl_p99 = fmt_ms_opt(agg.percentile(HistKind::Itl, 99.0)),
-        tps_p50 = fmt_opt(agg.tps_mean(), 2),
+        itl_p999 = fmt_ms_opt(agg.percentile(HistKind::Itl, 99.9)),
+        tps_p50 = fmt_opt(agg.tps_percentile(50.0), 2),
+        tps_p90 = fmt_opt(agg.tps_percentile(90.0), 2),
         tps_p99 = fmt_opt(agg.tps_percentile(99.0), 2),
+        tps_p999 = fmt_opt(agg.tps_percentile(99.9), 2),
         errors_rows = errors_rows,
         data_json = html_escape(&data_json),
         cache_card = cache_card,
@@ -347,13 +363,6 @@ fn build_model_alias_row(cfg: &RunConfig) -> String {
 fn fmt_ms_opt(us: Option<u64>) -> String {
     match us {
         Some(us) => format!("{:.2}", us as f64 / 1000.0),
-        None => "—".into(),
-    }
-}
-
-fn fmt_ms_opt_f64(us: Option<f64>) -> String {
-    match us {
-        Some(us) => format!("{:.2}", us / 1000.0),
         None => "—".into(),
     }
 }
@@ -634,6 +643,64 @@ mod tests {
         assert!(!e.contains('<'));
         assert!(!e.contains('>'));
         assert!(!e.contains('"'));
+    }
+
+    /// M6h: every metric in the Summary statistics table
+    /// must have all 4 percentiles filled, not "—". The
+    /// previous template hard-coded "—" for TTFT/ITL/TPS
+    /// p90 / p99.9 cells, even when the histograms had
+    /// enough samples to compute those percentiles. This
+    /// test seeds each histogram with 50 values (enough for
+    /// all 4 percentiles) and asserts no "—" appears in the
+    /// row for any metric.
+    #[test]
+    fn summary_table_fills_all_four_percentiles_per_metric() {
+        let mut agg = MetricsAggregator::new();
+        for i in 1..=50u32 {
+            let mut m = crate::client::RequestMetrics::default();
+            m.status = 200;
+            m.total_duration = Duration::from_millis(100 + i as u64);
+            m.ttft = Some(Duration::from_millis(40 + i as u64 / 2));
+            m.completion_tokens = 5;
+            // Add a few ITL samples per record so the ITL
+            // histogram has multiple values.
+            m.itl_samples = vec![
+                Duration::from_millis(20),
+                Duration::from_millis(30),
+                Duration::from_millis(40),
+            ];
+            agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
+        }
+        let html = render_html(&cfg(), &agg, false);
+        // Pull out the Summary statistics section so the
+        // assertions don't accidentally match "—" elsewhere
+        // in the page (status code, errors, etc.).
+        let summary_start = html.find("Summary statistics").expect("summary section");
+        let summary_end = html[summary_start..]
+            .find("</table>")
+            .map(|i| summary_start + i + "</table>".len())
+            .unwrap_or(html.len());
+        let summary = &html[summary_start..summary_end];
+
+        // The 4 metric rows must each have 4 numeric cells.
+        for metric in ["Latency (ms)", "TTFT (ms)", "ITL (ms)", "TPS (tok/s)"] {
+            let row_start = summary.find(metric).expect(metric);
+            let row_end = summary[row_start..]
+                .find("</tr>")
+                .map(|i| row_start + i + "</tr>".len())
+                .unwrap_or(summary.len());
+            let row = &summary[row_start..row_end];
+            assert!(
+                !row.contains("—"),
+                "M6h: {metric} row still has '—' in the Summary table: {row}"
+            );
+            // Every row should have 4 <td>...</td> data cells.
+            let td_count = row.matches("<td>").count();
+            assert_eq!(
+                td_count, 4,
+                "M6h: {metric} row should have 4 cells (label + 3 percentiles + 1), got {td_count}: {row}"
+            );
+        }
     }
 
     #[test]
