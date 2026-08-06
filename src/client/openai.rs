@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 
 use super::{ChatMessage, ChatRequest, LlmClient, RequestMetrics, StreamOptions};
 use crate::config::RunConfig;
+use crate::dataset::OwnedChatMessage;
 use crate::error::Result;
 
 pub struct OpenaiClient {
@@ -46,6 +47,34 @@ impl OpenaiClient {
                 role: "user",
                 content: prompt,
             }],
+            max_tokens: self.max_tokens,
+            stream: self.stream,
+            stream_options: if self.stream {
+                Some(StreamOptions {
+                    include_usage: true,
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Build a body with a full `messages` array. Used by the
+    /// multi-turn `send_messages` override below.
+    fn build_body_messages<'a>(
+        &'a self,
+        messages: &'a [OwnedChatMessage],
+    ) -> ChatRequest<'a> {
+        let borrowed: Vec<ChatMessage<'a>> = messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.as_str(),
+                content: m.content.as_str(),
+            })
+            .collect();
+        ChatRequest {
+            model: &self.model,
+            messages: borrowed,
             max_tokens: self.max_tokens,
             stream: self.stream,
             stream_options: if self.stream {
@@ -175,12 +204,30 @@ impl OpenaiClient {
 #[async_trait]
 impl LlmClient for OpenaiClient {
     async fn send(&self, prompt: &str, _estimated_prompt_tokens: u32) -> RequestMetrics {
+        let body = self.build_body(prompt);
+        self.dispatch(body).await
+    }
+
+    async fn send_messages(
+        &self,
+        messages: &[OwnedChatMessage],
+        _estimated_prompt_tokens: u32,
+    ) -> RequestMetrics {
+        let body = self.build_body_messages(messages);
+        self.dispatch(body).await
+    }
+}
+
+impl OpenaiClient {
+    /// Shared send path: build a body, send the request, parse the
+    /// response. Used by both `send` (single-turn) and `send_messages`
+    /// (multi-turn).
+    async fn dispatch(&self, body: ChatRequest<'_>) -> RequestMetrics {
         let started_at = chrono::Utc::now();
         let start = Instant::now();
         let mut m = RequestMetrics::default();
         m.started_at = started_at;
 
-        let body = self.build_body(prompt);
         let mut req = self.http.post(&self.target).json(&body);
         if let Some(key) = &self.api_key {
             if !key.is_empty() {
@@ -429,5 +476,75 @@ mod tests {
         // usage.completion_tokens (5) wins over the delta count (2).
         assert_eq!(m.completion_tokens, 5);
         assert!(!m.estimated);
+    }
+
+    /// M6 multi-turn: `send_messages` must put the full `messages`
+    /// array into the request body, not collapse to a single user
+    /// prompt.
+    #[tokio::test]
+    async fn send_messages_emits_full_messages_array_in_body() {
+        use crate::dataset::OwnedChatMessage;
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = concat!(
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [
+                    {"role": "system", "content": "be terse"},
+                    {"role": "user",   "content": "what is 2+2?"},
+                    {"role": "assistant", "content": "4."},
+                    {"role": "user",   "content": "and 3+3?"}
+                ]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut cfg = base_config();
+        cfg.target = format!("{}/v1/chat/completions", server.uri());
+        cfg.stream = true;
+        cfg.api_key = Some("sk-openai-test".into());
+        let c = OpenaiClient::new(&cfg).unwrap();
+        let messages = vec![
+            OwnedChatMessage::new("system", "be terse"),
+            OwnedChatMessage::new("user", "what is 2+2?"),
+            OwnedChatMessage::new("assistant", "4."),
+            OwnedChatMessage::new("user", "and 3+3?"),
+        ];
+        let m = c.send_messages(&messages, 1).await;
+        assert_eq!(m.status, 200, "err={:?}", m.error);
+        assert!(m.error.is_none());
+    }
+
+    /// M6 multi-turn: the unit-level body shape should be a real
+    /// multi-message `ChatRequest`, not the single-message form.
+    #[test]
+    fn build_body_messages_includes_all_roles() {
+        use crate::dataset::OwnedChatMessage;
+        let cfg = base_config();
+        let c = OpenaiClient::new(&cfg).unwrap();
+        let messages = vec![
+            OwnedChatMessage::new("system", "you are terse"),
+            OwnedChatMessage::new("user", "hi"),
+            OwnedChatMessage::new("assistant", "hello"),
+        ];
+        let body = c.build_body_messages(&messages);
+        assert_eq!(body.messages.len(), 3);
+        assert_eq!(body.messages[0].role, "system");
+        assert_eq!(body.messages[1].role, "user");
+        assert_eq!(body.messages[2].role, "assistant");
+        assert_eq!(body.messages[0].content, "you are terse");
     }
 }

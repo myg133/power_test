@@ -21,6 +21,7 @@ use serde::Serialize;
 
 use super::{LlmClient, RequestMetrics};
 use crate::config::RunConfig;
+use crate::dataset::OwnedChatMessage;
 use crate::error::{Error, Result};
 
 /// Anthropic API version header value. Hardcoded per the spec — not
@@ -76,6 +77,29 @@ impl AnthropicClient {
                 role: "user",
                 content: prompt,
             }],
+            stream: self.stream,
+        }
+    }
+
+    /// Build a body with a full `messages` array. Used by the
+    /// multi-turn `send_messages` override below. The caller is
+    /// responsible for filtering out any non-`user`/`assistant`
+    /// roles — Anthropic's spec only allows those two in `messages`.
+    pub fn build_body_messages<'a>(
+        &'a self,
+        messages: &'a [OwnedChatMessage],
+    ) -> AnthropicRequest<'a> {
+        let borrowed: Vec<AnthropicMessage<'a>> = messages
+            .iter()
+            .map(|m| AnthropicMessage {
+                role: m.role.as_str(),
+                content: m.content.as_str(),
+            })
+            .collect();
+        AnthropicRequest {
+            model: &self.model,
+            max_tokens: self.max_tokens,
+            messages: borrowed,
             stream: self.stream,
         }
     }
@@ -228,12 +252,30 @@ impl AnthropicClient {
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn send(&self, prompt: &str, _estimated_prompt_tokens: u32) -> RequestMetrics {
+        let body = self.build_body(prompt);
+        self.dispatch(body).await
+    }
+
+    async fn send_messages(
+        &self,
+        messages: &[OwnedChatMessage],
+        _estimated_prompt_tokens: u32,
+    ) -> RequestMetrics {
+        let body = self.build_body_messages(messages);
+        self.dispatch(body).await
+    }
+}
+
+impl AnthropicClient {
+    /// Shared send path: build a body, send the request, parse the
+    /// response. Used by both `send` (single-turn) and `send_messages`
+    /// (multi-turn).
+    async fn dispatch(&self, body: AnthropicRequest<'_>) -> RequestMetrics {
         let started_at = chrono::Utc::now();
         let start = Instant::now();
         let mut m = RequestMetrics::default();
         m.started_at = started_at;
 
-        let body = self.build_body(prompt);
         let resp = match self.build_request(&body).send().await {
             Ok(r) => r,
             Err(e) => {

@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::config::ApiKind;
+use crate::dataset::OwnedChatMessage;
 use crate::error::Result;
 
 /// Per-request measurement, filled in by the client and consumed by the
@@ -41,11 +42,39 @@ pub struct RequestMetrics {
     pub finished_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl RequestMetrics {
+    /// True when the request produced a usable response (2xx).
+    pub fn is_ok(&self) -> bool {
+        self.status >= 200 && self.status < 300 && self.error.is_none()
+    }
+}
+
 /// Send one chat completion. Implementations must never panic on a bad
 /// response — they should return a [`RequestMetrics`] with `error` set.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
+    /// Single-turn send. The `prompt` is the user-role text. The
+    /// default `send_messages` impl below collapses a multi-turn
+    /// `messages` array into one user prompt for clients that don't
+    /// override it.
     async fn send(&self, prompt: &str, estimated_prompt_tokens: u32) -> RequestMetrics;
+
+    /// Multi-turn send. Default impl joins all messages into a single
+    /// user-role prompt and calls `send`. Clients with first-class
+    /// multi-turn support (OpenAI, Anthropic) override this to send
+    /// the real `messages` array.
+    async fn send_messages(
+        &self,
+        messages: &[OwnedChatMessage],
+        estimated_prompt_tokens: u32,
+    ) -> RequestMetrics {
+        let joined = messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.send(&joined, estimated_prompt_tokens).await
+    }
 }
 
 /// Build the right client for the chosen [`ApiKind`].
