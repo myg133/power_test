@@ -3,7 +3,9 @@
 //! [`crate::dataset::sharegpt`], and [`crate::dataset::custom`].
 //!
 //! Selection is purely about which prompt to send next — the dataset does
-//! not know or care about the RPS, the pattern, or the duration.
+//! not know or care about the RPS, the pattern, or the duration. The
+//! `mode` field is forwarded from the loader so the executor can pick
+//! the right dispatch path (single / static_multi / dynamic_multi).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -12,7 +14,7 @@ use async_trait::async_trait;
 
 use crate::config::RequestStrategy;
 
-use super::{Dataset, DatasetItem};
+use super::{Dataset, DatasetItem, DatasetMode};
 
 /// A tiny xorshift64 PRNG. Avoids pulling in the `rand` crate for one
 /// method. The state is `u64` and we never need cryptographic strength
@@ -46,12 +48,13 @@ impl XorShift64 {
 pub struct PoolDataset {
     items: Vec<DatasetItem>,
     strategy: RequestStrategy,
+    mode: DatasetMode,
     counter: AtomicUsize,
     rng: Mutex<XorShift64>,
 }
 
 impl PoolDataset {
-    pub fn new(items: Vec<DatasetItem>, strategy: RequestStrategy) -> Self {
+    pub fn new(items: Vec<DatasetItem>, strategy: RequestStrategy, mode: DatasetMode) -> Self {
         // Seed from current nanoseconds so successive runs vary.
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -60,6 +63,7 @@ impl PoolDataset {
         Self {
             items,
             strategy,
+            mode,
             counter: AtomicUsize::new(0),
             rng: Mutex::new(XorShift64::new(seed)),
         }
@@ -77,6 +81,11 @@ impl Dataset for PoolDataset {
             return DatasetItem {
                 prompt: "hello".into(),
                 estimated_prompt_tokens: 1,
+                weight: None,
+                tags: Vec::new(),
+                name: None,
+                messages: None,
+                follow_ups: Vec::new(),
             };
         }
         let idx = match self.strategy {
@@ -91,6 +100,10 @@ impl Dataset for PoolDataset {
         };
         self.items[idx].clone()
     }
+
+    fn mode(&self) -> DatasetMode {
+        self.mode
+    }
 }
 
 #[cfg(test)]
@@ -103,13 +116,18 @@ mod tests {
             .map(|i| DatasetItem {
                 prompt: format!("prompt-{i}"),
                 estimated_prompt_tokens: estimate_tokens(&format!("prompt-{i}")),
+                weight: None,
+                tags: Vec::new(),
+                name: None,
+                messages: None,
+                follow_ups: Vec::new(),
             })
             .collect()
     }
 
     #[tokio::test]
     async fn round_robin_visits_all_in_order() {
-        let d = PoolDataset::new(items(3), RequestStrategy::RoundRobin);
+        let d = PoolDataset::new(items(3), RequestStrategy::RoundRobin, DatasetMode::Single);
         let a = d.next().await.prompt;
         let b = d.next().await.prompt;
         let c = d.next().await.prompt;
@@ -122,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn random_eventually_visits_all() {
-        let d = PoolDataset::new(items(4), RequestStrategy::Random);
+        let d = PoolDataset::new(items(4), RequestStrategy::Random, DatasetMode::Single);
         let mut seen = [false; 4];
         for _ in 0..200 {
             let p = d.next().await.prompt;
@@ -134,8 +152,14 @@ mod tests {
 
     #[tokio::test]
     async fn empty_pool_returns_fallback() {
-        let d = PoolDataset::new(vec![], RequestStrategy::Random);
+        let d = PoolDataset::new(vec![], RequestStrategy::Random, DatasetMode::Single);
         let item = d.next().await;
         assert!(!item.prompt.is_empty());
+    }
+
+    #[test]
+    fn mode_is_forwarded() {
+        let d = PoolDataset::new(items(1), RequestStrategy::RoundRobin, DatasetMode::DynamicMulti);
+        assert_eq!(d.mode(), DatasetMode::DynamicMulti);
     }
 }

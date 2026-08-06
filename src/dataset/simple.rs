@@ -18,6 +18,11 @@ impl SimpleDataset {
             item: DatasetItem {
                 prompt: text,
                 estimated_prompt_tokens: tokens,
+                weight: None,
+                tags: Vec::new(),
+                name: None,
+                messages: None,
+                follow_ups: Vec::new(),
             },
         }
     }

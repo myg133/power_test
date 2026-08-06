@@ -36,6 +36,11 @@ pub fn builtin_pool() -> Vec<DatasetItem> {
         .map(|s| DatasetItem {
             prompt: (*s).to_string(),
             estimated_prompt_tokens: crate::config::estimate_tokens(s),
+            weight: None,
+            tags: Vec::new(),
+            name: None,
+            messages: None,
+            follow_ups: Vec::new(),
         })
         .collect()
 }

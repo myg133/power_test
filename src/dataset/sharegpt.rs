@@ -81,6 +81,11 @@ pub fn load(path: &Path) -> Result<Vec<DatasetItem>> {
                 out.push(DatasetItem {
                     prompt: trimmed.to_string(),
                     estimated_prompt_tokens: tokens,
+                    weight: None,
+                    tags: Vec::new(),
+                    name: None,
+                    messages: None,
+                    follow_ups: Vec::new(),
                 });
             }
         }

@@ -15,3 +15,7 @@ Thumbs.db
 *.log
 # Exception: M3 verification evidence is kept under docs/internal/,
 # not as raw log files. The originals are intentionally excluded.
+
+# Ad-hoc probe output from manual runs
+*_probe.txt
+
