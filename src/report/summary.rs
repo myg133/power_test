@@ -129,6 +129,41 @@ pub fn render_summary(cfg: &RunConfig, agg: &MetricsAggregator, interrupted: boo
         let _ = writeln!(s);
     }
 
+    // M6e: prompt-cache section. Only emitted when the run saw
+    // any cache data — otherwise a single-turn run with no
+    // prompt-cache support would just print "0%" everywhere and
+    // confuse the reader.
+    let cache = agg.cache_stats();
+    if cache.cache_creation_total > 0 || cache.cache_hit_total > 0 {
+        let _ = writeln!(s, "prompt cache");
+        let _ = writeln!(s, "------------");
+        let _ = writeln!(
+            s,
+            "  hit rate:        {:>6.2}%   ({} / {} prompt tokens)",
+            cache.rate_overall,
+            cache.cache_hit_total,
+            cache.prompt_turn1 + cache.prompt_turn2plus
+        );
+        let _ = writeln!(
+            s,
+            "    turn 1:        {:>6.2}%   ({} / {} prompt tokens)",
+            cache.rate_turn1, cache.cache_hit_turn1, cache.prompt_turn1
+        );
+        let _ = writeln!(
+            s,
+            "    turn 2+:       {:>6.2}%   ({} / {} prompt tokens)",
+            cache.rate_turn2plus, cache.cache_hit_turn2plus, cache.prompt_turn2plus
+        );
+        let _ = writeln!(
+            s,
+            "  cache creation:  {} tokens (turn 1: {} · turn 2+: {})",
+            cache.cache_creation_total,
+            cache.cache_creation_turn1,
+            cache.cache_creation_turn2plus
+        );
+        let _ = writeln!(s);
+    }
+
     s
 }
 
@@ -266,5 +301,45 @@ mod tests {
         assert!(text.contains("dataset: built-in"));
         assert!(text.contains("strategy=round-robin"));
         assert!(text.contains("12 prompts"));
+    }
+
+    /// M6e: a single-turn run with no cache data must NOT emit
+    /// a "prompt cache" section. Otherwise every run would
+    /// print a confusing 0% line.
+    #[test]
+    fn summary_omits_cache_section_when_no_data() {
+        let text = render_summary(&cfg(), &MetricsAggregator::new(), false);
+        assert!(
+            !text.contains("prompt cache"),
+            "summary should omit cache section when no cache data was observed"
+        );
+    }
+
+    /// M6e: a run with cache data should emit the cache section
+    /// with overall / turn 1 / turn 2+ rates and totals.
+    #[test]
+    fn summary_shows_cache_section_when_data_present() {
+        let mut agg = MetricsAggregator::new();
+        // Two-turn session: turn 1 misses, turn 2 hits.
+        for turn in 1u32..=2 {
+            let m = crate::client::RequestMetrics {
+                status: 200,
+                prompt_tokens: 100,
+                cache_creation_input_tokens: if turn == 1 { 100 } else { 0 },
+                cache_hit_input_tokens: if turn == 1 { 0 } else { 100 },
+                ..Default::default()
+            };
+            agg.record_completed(
+                &m,
+                0,
+                &crate::runner::CompletionContext::turn("s", turn, turn > 1),
+            );
+        }
+        let text = render_summary(&cfg(), &agg, false);
+        assert!(text.contains("prompt cache"), "section header missing");
+        assert!(text.contains("hit rate:"), "overall rate line missing");
+        assert!(text.contains("turn 1:"), "turn-1 line missing");
+        assert!(text.contains("turn 2+:"), "turn-2+ line missing");
+        assert!(text.contains("cache creation:"), "cache creation line missing");
     }
 }

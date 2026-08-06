@@ -125,6 +125,20 @@ impl OpenaiClient {
                     if let Some(pt) = u.get("prompt_tokens").and_then(|v| v.as_u64()) {
                         usage_prompt = Some(pt as u32);
                     }
+                    // M6e: OpenAI's prompt-cache hit count lives
+                    // at `usage.prompt_tokens_details.cached_tokens`.
+                    // Not all OpenAI-compatible servers honor this
+                    // — the Anspire proxy (192.168.31.101:8317) is
+                    // an example that *does* return it for cached
+                    // prefixes. We read it if present, ignore
+                    // otherwise.
+                    if let Some(cached) = u
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                    {
+                        m.cache_hit_input_tokens = cached as u32;
+                    }
                 }
                 if let Some(choices) = parsed.get("choices").and_then(|v| v.as_array()) {
                     for choice in choices {
@@ -218,6 +232,15 @@ impl OpenaiClient {
             }
             if let Some(pt) = u.get("prompt_tokens").and_then(|v| v.as_u64()) {
                 m.prompt_tokens = pt as u32;
+            }
+            // M6e: same field as the streaming path — see comment
+            // there for which servers return it.
+            if let Some(cached) = u
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+            {
+                m.cache_hit_input_tokens = cached as u32;
             }
         }
         let total = start.elapsed();
@@ -571,5 +594,96 @@ mod tests {
         assert_eq!(body.messages[1].role, "user");
         assert_eq!(body.messages[2].role, "assistant");
         assert_eq!(body.messages[0].content, "you are terse");
+    }
+
+    /// M6e: streaming response with
+    /// `usage.prompt_tokens_details.cached_tokens` must populate
+    /// `RequestMetrics::cache_hit_input_tokens`. Anspire and
+    /// other OpenAI-compatible proxies that support prompt cache
+    /// surface the field in the final SSE chunk.
+    #[tokio::test]
+    async fn full_streaming_reads_cached_tokens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = concat!(
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+            "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":1,",
+            "\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = base_config();
+        cfg.target = format!("{}/v1/chat/completions", server.uri());
+        cfg.stream = true;
+        cfg.api_key = Some("sk-openai-test".into());
+        let c = OpenaiClient::new(&cfg).unwrap();
+        let m = c.send("hi", 1).await;
+        assert_eq!(m.status, 200, "err={:?}", m.error);
+        assert_eq!(m.prompt_tokens, 100);
+        assert_eq!(
+            m.cache_hit_input_tokens, 80,
+            "M6e: cached_tokens from prompt_tokens_details must land in RequestMetrics"
+        );
+        // OpenAI doesn't surface cache_creation — only Anthropic does.
+        assert_eq!(m.cache_creation_input_tokens, 0);
+    }
+
+    /// M6e: non-streaming response with the same
+    /// `prompt_tokens_details.cached_tokens` field must also
+    /// populate the metrics.
+    #[tokio::test]
+    async fn non_streaming_reads_cached_tokens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": "1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 25}
+            }
+        })
+        .to_string();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = base_config();
+        cfg.target = format!("{}/v1/chat/completions", server.uri());
+        cfg.stream = false; // exercise the parse_single path
+        cfg.api_key = Some("sk-openai-test".into());
+        let c = OpenaiClient::new(&cfg).unwrap();
+        let m = c.send("hi", 1).await;
+        assert_eq!(m.status, 200, "err={:?}", m.error);
+        assert_eq!(m.prompt_tokens, 50);
+        assert_eq!(m.cache_hit_input_tokens, 25);
     }
 }

@@ -155,16 +155,42 @@ impl AnthropicClient {
                         // Drain a few more events, but don't keep parsing.
                     }
                     EventKind::MessageStart => {
-                        // usage.input_tokens lives here.
+                        // usage.input_tokens + cache_creation_input_tokens +
+                        // cache_read_input_tokens all live here. We
+                        // snapshot both cache fields — later events
+                        // (message_delta) only update the regular
+                        // input/output tokens.
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.data)
                         {
-                            if let Some(inp) = parsed
+                            if let Some(usage) = parsed
                                 .get("message")
                                 .and_then(|m| m.get("usage"))
-                                .and_then(|u| u.get("input_tokens"))
-                                .and_then(|v| v.as_u64())
                             {
-                                usage_prompt = Some(inp as u32);
+                                if let Some(inp) = usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                {
+                                    usage_prompt = Some(inp as u32);
+                                }
+                                // M6e: prompt-cache accounting. On
+                                // Anthropic, the model's first
+                                // request to a long prefix pays
+                                // `cache_creation_input_tokens`; later
+                                // requests to the same prefix (e.g. a
+                                // multi-turn session) get
+                                // `cache_read_input_tokens` for free.
+                                if let Some(cc) = usage
+                                    .get("cache_creation_input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                {
+                                    m.cache_creation_input_tokens = cc as u32;
+                                }
+                                if let Some(cr) = usage
+                                    .get("cache_read_input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                {
+                                    m.cache_hit_input_tokens = cr as u32;
+                                }
                             }
                         }
                     }
@@ -273,6 +299,19 @@ impl AnthropicClient {
             }
             if let Some(pt) = u.get("input_tokens").and_then(|v| v.as_u64()) {
                 m.prompt_tokens = pt as u32;
+            }
+            // M6e: same cache fields as the streaming path.
+            if let Some(cc) = u
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                m.cache_creation_input_tokens = cc as u32;
+            }
+            if let Some(cr) = u
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+            {
+                m.cache_hit_input_tokens = cr as u32;
             }
         }
         let total = start.elapsed();
@@ -853,5 +892,156 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(b"ok").unwrap();
         assert_eq!(f.path().metadata().unwrap().len(), 2);
+    }
+
+    /// M6e: streaming response with `cache_creation_input_tokens`
+    /// and `cache_read_input_tokens` in `message_start.usage`
+    /// must populate `RequestMetrics::cache_creation_input_tokens`
+    /// and `RequestMetrics::cache_hit_input_tokens`. Anthropic
+    /// emits both fields in the same `message_start` event.
+    #[tokio::test]
+    async fn full_streaming_reads_cache_creation_and_cache_read() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{",
+            "\"usage\":{",
+            "\"input_tokens\":1000,",
+            "\"cache_creation_input_tokens\":800,",
+            "\"cache_read_input_tokens\":0,",
+            "\"output_tokens\":0}}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,",
+            "\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = base_config();
+        cfg.target = format!("{}/v1/messages", server.uri());
+        cfg.stream = true;
+        let c = AnthropicClient::new(&cfg).unwrap();
+        let m = c.send("hi", 1).await;
+        assert_eq!(m.status, 200, "err={:?}", m.error);
+        assert_eq!(m.prompt_tokens, 1000);
+        assert_eq!(
+            m.cache_creation_input_tokens, 800,
+            "M6e: cache_creation_input_tokens must be parsed from message_start"
+        );
+        assert_eq!(m.cache_hit_input_tokens, 0);
+    }
+
+    /// M6e: when the second turn of a multi-turn session hits
+    /// the cache, `message_start.usage.cache_read_input_tokens`
+    /// is the field to read.
+    #[tokio::test]
+    async fn full_streaming_reads_cache_read_on_continuation() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{",
+            "\"usage\":{",
+            "\"input_tokens\":1000,",
+            "\"cache_creation_input_tokens\":0,",
+            "\"cache_read_input_tokens\":900,",
+            "\"output_tokens\":0}}}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,",
+            "\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n",
+            "\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n",
+            "\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = base_config();
+        cfg.target = format!("{}/v1/messages", server.uri());
+        cfg.stream = true;
+        let c = AnthropicClient::new(&cfg).unwrap();
+        let m = c.send("hi", 1).await;
+        assert_eq!(m.status, 200, "err={:?}", m.error);
+        assert_eq!(m.cache_creation_input_tokens, 0);
+        assert_eq!(
+            m.cache_hit_input_tokens, 900,
+            "M6e: cache_read_input_tokens is what we look at on continuation turns"
+        );
+    }
+
+    /// M6e: non-streaming response with cache fields in body
+    /// `usage` must populate the metrics too.
+    #[tokio::test]
+    async fn non_streaming_reads_cache_fields() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-test",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 200,
+                "output_tokens": 1,
+                "cache_creation_input_tokens": 50,
+                "cache_read_input_tokens": 0
+            }
+        })
+        .to_string();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = base_config();
+        cfg.target = format!("{}/v1/messages", server.uri());
+        cfg.stream = false;
+        let c = AnthropicClient::new(&cfg).unwrap();
+        let m = c.send("hi", 1).await;
+        assert_eq!(m.status, 200, "err={:?}", m.error);
+        assert_eq!(m.prompt_tokens, 200);
+        assert_eq!(m.cache_creation_input_tokens, 50);
+        assert_eq!(m.cache_hit_input_tokens, 0);
     }
 }

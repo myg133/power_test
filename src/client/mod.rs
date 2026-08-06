@@ -44,6 +44,21 @@ pub struct RequestMetrics {
     /// back into the next turn's `messages` so the model sees
     /// the prior assistant response.
     pub response_text: String,
+    /// M6e: prompt tokens the model wrote to its prefix KV cache
+    /// on this request. Anthropic emits this as
+    /// `usage.cache_creation_input_tokens`; OpenAI does not surface
+    /// an equivalent field, so this stays 0 on the OpenAI path.
+    /// A high number here means the model is paying a one-time cost
+    /// to cache a long prefix; subsequent requests to the same
+    /// prefix will start hitting `cache_hit_input_tokens` instead.
+    pub cache_creation_input_tokens: u32,
+    /// M6e: prompt tokens served from the model's prefix cache.
+    /// On Anthropic, this is `usage.cache_read_input_tokens` (a
+    /// hit, not a re-compute). On OpenAI, this is
+    /// `usage.prompt_tokens_details.cached_tokens` (same concept,
+    /// different field name). `RawClient` leaves this 0 because
+    /// raw HTTP has no JSON to read.
+    pub cache_hit_input_tokens: u32,
     /// Wall-clock time the request was issued.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Wall-clock time the request finished.

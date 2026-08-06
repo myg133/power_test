@@ -1069,6 +1069,8 @@ mod tests {
             session_id: None,
             session_turn: None,
             session_continuation: false,
+            cache_creation_input_tokens: 0,
+            cache_hit_input_tokens: 0,
         }
     }
 

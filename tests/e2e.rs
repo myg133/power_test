@@ -996,3 +996,116 @@ async fn e2e_dynamic_multi_response_text_flows_into_next_turn() {
         "M6d: assistant text from turn 2 must be in the session"
     );
 }
+
+/// M6e: a 2-turn dynamic session with turn 1 writing 100 tokens
+/// to cache and turn 2 reading 100 tokens from cache should
+/// surface `cache_creation_total=100`, `cache_hit_total=100`,
+/// `rate_turn1=0%`, and `rate_turn2plus=100%` in
+/// `MetricsAggregator::cache_stats()`. Drives the full path
+/// client → metrics → aggregator, so any broken wire-up in
+/// any of those would fail this test.
+#[tokio::test]
+async fn e2e_dynamic_multi_cache_hit_rate_aggregates_per_turn() {
+    use power_test::dataset::OwnedChatMessage;
+    use power_test::runner::session::{SessionPool, TurnAction};
+    use power_test::runner::MetricsAggregator;
+    use std::sync::Arc as StdArc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    let mut cfg = build_config(
+        "http://localhost:1/v1/chat/completions".into(),
+        1,
+    );
+    cfg.api_key = Some("sk-test".into());
+    // We don't actually call the network — this test exercises
+    // the aggregator path directly. We only need a valid
+    // `RunConfig` and a `RequestMetrics` builder.
+    let client: Arc<dyn power_test::client::LlmClient> =
+        Arc::from(power_test::client::build(&cfg).expect("client builds"));
+
+    // Build a fake "turn 1" and "turn 2" record.
+    let turn1 = power_test::client::RequestMetrics {
+        status: 200,
+        prompt_tokens: 100,
+        cache_creation_input_tokens: 100,
+        cache_hit_input_tokens: 0,
+        started_at: chrono::Utc::now(),
+        finished_at: chrono::Utc::now(),
+        ..Default::default()
+    };
+    let turn2 = power_test::client::RequestMetrics {
+        status: 200,
+        prompt_tokens: 100,
+        cache_creation_input_tokens: 0,
+        cache_hit_input_tokens: 100,
+        started_at: chrono::Utc::now(),
+        finished_at: chrono::Utc::now(),
+        ..Default::default()
+    };
+
+    // Drive a 2-turn session with a real SessionPool so we
+    // exercise the same code path as the executor (the pool
+    // doesn't care about cache fields, but we want the test to
+    // look like the real thing).
+    let pool = StdArc::new(SessionPool::new(2));
+    let item = power_test::dataset::DatasetItem {
+        prompt: "[user] hi".into(),
+        estimated_prompt_tokens: 100,
+        weight: None,
+        tags: Vec::new(),
+        name: Some("cached-q".into()),
+        messages: Some(vec![OwnedChatMessage::new("user", "hi")]),
+        follow_ups: vec!["again".into()],
+    };
+    let h = pool.acquire_evict_lru(&item).expect("acquire");
+    let agg = StdArc::new(TokioMutex::new(MetricsAggregator::new()));
+    let session_id = pool.snapshot().last().unwrap().id.clone();
+
+    // Turn 1: record a seed request that pays the cache_creation cost.
+    {
+        let mut g = agg.lock().await;
+        g.record_completed(
+            &turn1,
+            0,
+            &power_test::runner::CompletionContext::turn(session_id.clone(), 1, false),
+        );
+    }
+    h.complete(turn1.response_text.clone(), true);
+    // Turn 2: record a continuation that hits the cache.
+    let mut msgs = h.messages();
+    msgs.push(OwnedChatMessage::new("user", "again"));
+    {
+        let mut g = agg.lock().await;
+        g.record_completed(
+            &turn2,
+            0,
+            &power_test::runner::CompletionContext::turn(session_id.clone(), 2, true),
+        );
+    }
+    let r = h.complete(turn2.response_text.clone(), false);
+    assert_eq!(r.action, TurnAction::Done);
+
+    // Now assert the cache stats.
+    let g = agg.lock().await;
+    let c = g.cache_stats();
+    assert_eq!(c.cache_creation_total, 100, "creation: 100 turn-1 tokens");
+    assert_eq!(c.cache_hit_total, 100, "hit: 100 turn-2 tokens");
+    assert!((c.rate_overall - 50.0).abs() < 1e-6, "overall 50%, got {}", c.rate_overall);
+    assert_eq!(c.rate_turn1, 0.0, "turn 1 = full miss");
+    assert!(
+        (c.rate_turn2plus - 100.0).abs() < 1e-6,
+        "turn 2+ = full hit, got {}",
+        c.rate_turn2plus
+    );
+    // The cache totals must also make it into the JSON dump
+    // that `aggregator_to_json` produces (used by `metrics.json`
+    // and downstream tooling).
+    let json = power_test::runner::aggregator_to_json(&g);
+    let cache_json = json.get("cache").expect("cache section");
+    assert_eq!(cache_json["creation_total"], 100);
+    assert_eq!(cache_json["hit_total"], 100);
+    // 50% to one decimal
+    assert!((cache_json["rate_overall_pct"].as_f64().unwrap() - 50.0).abs() < 1e-6);
+    drop(g);
+    let _ = client; // silence unused
+}

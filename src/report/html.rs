@@ -37,6 +37,7 @@ pub fn render_html_with_compare(
     let lp = latency_percentiles(agg);
     let sb = status_breakdown(agg);
     let rt = rps_timeline(agg);
+    let cache_card = build_cache_card(agg);
 
     let title = format!("power_test report — {}", cfg.run_id);
     let achieved_rps = if cfg.duration_secs > 0 {
@@ -180,6 +181,8 @@ pub fn render_html_with_compare(
       </tbody>
     </table>
 
+    {cache_card}
+
     <h2>Charts</h2>
     <div class="charts">
       <div class="chart-card"><h3>Latency percentiles (ms)</h3><canvas id="latencyChart"></canvas></div>
@@ -310,6 +313,7 @@ pub fn render_html_with_compare(
         tps_p99 = fmt_opt(agg.tps_percentile(99.0), 2),
         errors_rows = errors_rows,
         data_json = html_escape(&data_json),
+        cache_card = cache_card,
         version = env!("CARGO_PKG_VERSION"),
         pattern_name = cfg.pattern.name(),
         pattern_detail = html_escape(&format_pattern_detail(&cfg.pattern)),
@@ -400,6 +404,71 @@ fn build_compare_panel(links: &[(String, String)]) -> String {
     );
     out.push_str("</div>");
     out
+}
+
+/// M6e: render a single "Cache" card with the global hit rate
+/// plus a turn-1 vs turn-2+ bar pair. Returns an empty string
+/// when the run saw no cache data so the section disappears
+/// for single-turn / non-caching runs.
+fn build_cache_card(agg: &MetricsAggregator) -> String {
+    let c = agg.cache_stats();
+    if c.cache_creation_total == 0 && c.cache_hit_total == 0 {
+        return String::new();
+    }
+    let overall_pct = format!("{:.1}%", c.rate_overall);
+    let creation = c.cache_creation_total;
+    let hit = c.cache_hit_total;
+    // The bar widths are normalized to the maximum rate across the
+    // three columns (overall / turn 1 / turn 2+) so the bars
+    // visually compare. When the rate is 0 the bar is invisible
+    // (width = 0); the label still shows.
+    let max_rate = c
+        .rate_overall
+        .max(c.rate_turn1)
+        .max(c.rate_turn2plus)
+        .max(1.0);
+    let bar_w = |rate: f64| -> u32 { ((rate / max_rate) * 100.0).round() as u32 };
+    let bar_overall = bar_w(c.rate_overall);
+    let bar_turn1 = bar_w(c.rate_turn1);
+    let bar_turn2 = bar_w(c.rate_turn2plus);
+    format!(
+        r##"<h2>Prompt cache</h2>
+<div class="card" style="margin-bottom:24px;">
+  <div class="label" style="color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">Cache hit rate</div>
+  <div style="font-size:32px;font-weight:600;margin:4px 0 16px 0;">{overall_pct}</div>
+  <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">{hit} of {creation_plus_hit} prompt tokens served from prefix cache · {creation} tokens written to cache</div>
+  <table style="width:auto;background:transparent;border:none;">
+    <tbody>
+      <tr><td style="border:none;padding:4px 12px 4px 0;color:var(--muted);width:120px;">Overall</td>
+          <td style="border:none;padding:4px 0;width:300px;background:rgba(255,255,255,0.04);border-radius:3px;">
+            <div style="height:14px;width:{bar_overall}%;background:var(--accent);border-radius:3px;min-width:2px;"></div>
+          </td>
+          <td style="border:none;padding:4px 0 4px 12px;font-family:ui-monospace,SFMono-Regular,monospace;">{overall_pct_text}</td></tr>
+      <tr><td style="border:none;padding:4px 12px 4px 0;color:var(--muted);">Turn 1</td>
+          <td style="border:none;padding:4px 0;background:rgba(255,255,255,0.04);border-radius:3px;">
+            <div style="height:14px;width:{bar_turn1}%;background:var(--good);border-radius:3px;min-width:2px;"></div>
+          </td>
+          <td style="border:none;padding:4px 0 4px 12px;font-family:ui-monospace,SFMono-Regular,monospace;">{turn1_pct_text}</td></tr>
+      <tr><td style="border:none;padding:4px 12px 4px 0;color:var(--muted);">Turn 2+</td>
+          <td style="border:none;padding:4px 0;background:rgba(255,255,255,0.04);border-radius:3px;">
+            <div style="height:14px;width:{bar_turn2}%;background:var(--accent);border-radius:3px;min-width:2px;"></div>
+          </td>
+          <td style="border:none;padding:4px 0 4px 12px;font-family:ui-monospace,SFMono-Regular,monospace;">{turn2_pct_text}</td></tr>
+    </tbody>
+  </table>
+  <div style="font-size:11px;color:var(--muted);margin-top:8px;">Turn 1 is the seed (often a miss); turn 2+ shows the steady-state hit rate for multi-turn sessions.</div>
+</div>"##,
+        overall_pct = overall_pct,
+        hit = hit,
+        creation = creation,
+        creation_plus_hit = creation + hit,
+        bar_overall = bar_overall,
+        bar_turn1 = bar_turn1,
+        bar_turn2 = bar_turn2,
+        overall_pct_text = format!("{:.1}%", c.rate_overall),
+        turn1_pct_text = format!("{:.1}%", c.rate_turn1),
+        turn2_pct_text = format!("{:.1}%", c.rate_turn2plus),
+    )
 }
 
 fn build_errors_rows(agg: &MetricsAggregator) -> String {
@@ -574,5 +643,46 @@ mod tests {
         assert!(html.contains("round-robin"));
         assert!(html.contains("Prompt tokens"));
         assert!(html.contains("12 prompts"));
+    }
+
+    /// M6e: a single-turn run with no cache data must NOT emit
+    /// the cache card — otherwise every report would show a
+    /// 0.0% headline and confuse the reader.
+    #[test]
+    fn html_omits_cache_card_when_no_data() {
+        let html = render_html(&cfg(), &MetricsAggregator::new(), false);
+        assert!(
+            !html.contains("Prompt cache"),
+            "cache card should be hidden when no cache data was observed"
+        );
+    }
+
+    /// M6e: with cache data, the report must include the
+    /// "Prompt cache" section, the global hit-rate headline,
+    /// and the per-turn rows.
+    #[test]
+    fn html_includes_cache_card_when_data_present() {
+        let mut agg = MetricsAggregator::new();
+        for turn in 1u32..=2 {
+            let m = crate::client::RequestMetrics {
+                status: 200,
+                prompt_tokens: 100,
+                cache_creation_input_tokens: if turn == 1 { 100 } else { 0 },
+                cache_hit_input_tokens: if turn == 1 { 0 } else { 100 },
+                ..Default::default()
+            };
+            agg.record_completed(
+                &m,
+                0,
+                &crate::runner::metrics::CompletionContext::turn("s", turn, turn > 1),
+            );
+        }
+        let html = render_html(&cfg(), &agg, false);
+        assert!(html.contains("Prompt cache"), "section heading missing");
+        assert!(html.contains("Cache hit rate"), "headline missing");
+        // Per-turn rows
+        assert!(html.contains("Overall"));
+        assert!(html.contains("Turn 1"));
+        assert!(html.contains("Turn 2+"));
     }
 }

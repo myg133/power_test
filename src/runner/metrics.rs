@@ -67,6 +67,16 @@ pub struct RequestRecord {
     pub session_turn: Option<u32>,
     #[serde(default)]
     pub session_continuation: bool,
+    /// M6e: tokens the model wrote to its prefix cache on this
+    /// request. Anthropic only; OpenAI leaves 0. `#[serde(default)]`
+    /// so old metrics.json files (pre-M6e) still deserialize.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    /// M6e: prompt tokens served from the prefix cache. Anthropic
+    /// reads this from `usage.cache_read_input_tokens`; OpenAI
+    /// reads it from `usage.prompt_tokens_details.cached_tokens`.
+    #[serde(default)]
+    pub cache_hit_input_tokens: u32,
 }
 
 impl RequestRecord {
@@ -89,6 +99,8 @@ impl RequestRecord {
             session_id: ctx.session_id.clone(),
             session_turn: ctx.session_turn,
             session_continuation: ctx.session_continuation,
+            cache_creation_input_tokens: m.cache_creation_input_tokens,
+            cache_hit_input_tokens: m.cache_hit_input_tokens,
         }
     }
 
@@ -134,6 +146,20 @@ pub struct MetricsAggregator {
     /// `session_dropped` is the number of sessions that bailed out
     /// early because a turn returned non-2xx or empty assistant text.
     session_dropped: u64,
+    /// M6e: prompt-cache accounting. We track totals across the
+    /// whole run plus per-turn buckets (turn 1 vs turn 2+). The
+    /// per-turn split is what makes a multi-turn session useful:
+    /// turn 1 is always a miss (it pays the cache_creation cost or
+    /// is fully uncached), turn 2+ is the interesting one.
+    cache_creation_total: u64,
+    cache_hit_total: u64,
+    prompt_for_cache_rate: u64,
+    cache_hit_turn1: u64,
+    prompt_turn1: u64,
+    cache_hit_turn2plus: u64,
+    prompt_turn2plus: u64,
+    cache_creation_turn1: u64,
+    cache_creation_turn2plus: u64,
 }
 
 impl MetricsAggregator {
@@ -159,6 +185,15 @@ impl MetricsAggregator {
             session_count: 0,
             session_turn_total: 0,
             session_dropped: 0,
+            cache_creation_total: 0,
+            cache_hit_total: 0,
+            prompt_for_cache_rate: 0,
+            cache_hit_turn1: 0,
+            prompt_turn1: 0,
+            cache_hit_turn2plus: 0,
+            prompt_turn2plus: 0,
+            cache_creation_turn1: 0,
+            cache_creation_turn2plus: 0,
         }
     }
 
@@ -221,6 +256,11 @@ impl MetricsAggregator {
         if rec.session_id.is_some() {
             self.session_turn_total += 1;
         }
+        // M6e: cache aggregation. Single-turn records land in the
+        // turn-1 bucket by default (no per-turn distinction in
+        // single-turn mode; the renderer treats the overall rate
+        // as the headline number and turn 1 as a fallback).
+        self.accumulate_cache(rec, rec.session_turn.unwrap_or(1));
         self.per_request.push(rec.clone());
     }
 
@@ -284,7 +324,37 @@ impl MetricsAggregator {
         if rec.session_id.is_some() {
             self.session_turn_total += 1;
         }
+        // M6e: cache aggregation. `turn_for_cache` is the turn
+        // number (1 for seed, 2+ for continuations) or 1 for any
+        // single-turn request.
+        let turn_for_cache = rec.session_turn.unwrap_or(1);
+        self.accumulate_cache(&rec, turn_for_cache);
         self.per_request.push(rec);
+    }
+
+    /// M6e: accumulate per-request cache stats into the right
+    /// buckets. `turn` is 1 for the first turn of a session (or
+    /// any single-turn request) and 2+ for continuations. Prompt
+    /// tokens count toward the rate denominator only when the
+    /// request actually saw prompt tokens (errors, empty
+    /// bodies, and 0-token estimates don't pollute the rate).
+    fn accumulate_cache(&mut self, rec: &RequestRecord, turn: u32) {
+        self.cache_creation_total += rec.cache_creation_input_tokens as u64;
+        self.cache_hit_total += rec.cache_hit_input_tokens as u64;
+        if rec.prompt_tokens > 0 {
+            self.prompt_for_cache_rate += rec.prompt_tokens as u64;
+            if turn <= 1 {
+                self.cache_hit_turn1 += rec.cache_hit_input_tokens as u64;
+                self.prompt_turn1 += rec.prompt_tokens as u64;
+                self.cache_creation_turn1 +=
+                    rec.cache_creation_input_tokens as u64;
+            } else {
+                self.cache_hit_turn2plus += rec.cache_hit_input_tokens as u64;
+                self.prompt_turn2plus += rec.prompt_tokens as u64;
+                self.cache_creation_turn2plus +=
+                    rec.cache_creation_input_tokens as u64;
+            }
+        }
     }
 
     pub fn per_request(&self) -> &[RequestRecord] {
@@ -381,6 +451,27 @@ impl MetricsAggregator {
         (self.session_count, self.session_turn_total, self.session_dropped)
     }
 
+    /// M6e: prompt-cache stats. All rates are `hit / prompt`,
+    /// expressed as percentages (0.0–100.0). When no cache data
+    /// was seen, all rates are 0.0 and `cache_creation_total` /
+    /// `cache_hit_total` are both 0. Callers can detect "no data"
+    /// by checking `cache_creation_total + cache_hit_total == 0`.
+    pub fn cache_stats(&self) -> CacheStats {
+        CacheStats {
+            cache_creation_total: self.cache_creation_total,
+            cache_hit_total: self.cache_hit_total,
+            rate_overall: rate_pct(self.cache_hit_total, self.prompt_for_cache_rate),
+            rate_turn1: rate_pct(self.cache_hit_turn1, self.prompt_turn1),
+            rate_turn2plus: rate_pct(self.cache_hit_turn2plus, self.prompt_turn2plus),
+            cache_creation_turn1: self.cache_creation_turn1,
+            cache_creation_turn2plus: self.cache_creation_turn2plus,
+            prompt_turn1: self.prompt_turn1,
+            prompt_turn2plus: self.prompt_turn2plus,
+            cache_hit_turn1: self.cache_hit_turn1,
+            cache_hit_turn2plus: self.cache_hit_turn2plus,
+        }
+    }
+
     pub fn total_completion_tokens(&self) -> u64 {
         self.per_request
             .iter()
@@ -406,6 +497,43 @@ pub enum HistKind {
     Itl,
 }
 
+/// M6e: prompt-cache hit rate snapshot, computed once per report.
+/// `rate_overall` is the headline number; `rate_turn1` and
+/// `rate_turn2plus` split by session turn so multi-turn runs
+/// surface "the seed request misses but the continuation
+/// requests hit at 99%" without further work by the reader.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheStats {
+    /// Total prompt tokens the model wrote to its prefix cache
+    /// across the whole run.
+    pub cache_creation_total: u64,
+    /// Total prompt tokens served from the prefix cache.
+    pub cache_hit_total: u64,
+    /// `100 * cache_hit_total / total_prompt_tokens`. 0.0 when
+    /// no prompt tokens were seen.
+    pub rate_overall: f64,
+    /// Cache hit rate on the first turn of a session (or any
+    /// single-turn request).
+    pub rate_turn1: f64,
+    /// Cache hit rate on continuation turns (turn 2+). For pure
+    /// single-turn runs, this is 0.0 because no continuations
+    /// were observed.
+    pub rate_turn2plus: f64,
+    /// Tokens the model wrote to cache on turn 1. Almost always
+    /// positive on the first turn of a long-prefix session.
+    pub cache_creation_turn1: u64,
+    pub cache_creation_turn2plus: u64,
+    /// Prompt tokens (denominator) seen on turn 1. Useful for
+    /// the summary line "5 / 100 prompt tokens".
+    pub prompt_turn1: u64,
+    /// Prompt tokens (denominator) seen on turn 2+.
+    pub prompt_turn2plus: u64,
+    /// Cache hit tokens (numerator) on turn 1.
+    pub cache_hit_turn1: u64,
+    /// Cache hit tokens (numerator) on turn 2+.
+    pub cache_hit_turn2plus: u64,
+}
+
 fn truncate_msg(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -418,10 +546,19 @@ fn truncate_msg(s: &str, max: usize) -> String {
     }
 }
 
+fn rate_pct(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        100.0 * numerator as f64 / denominator as f64
+    }
+}
+
 /// Serialize an aggregator to the JSON shape used in `metrics.json`.
 pub fn aggregator_to_json(agg: &MetricsAggregator) -> serde_json::Value {
     let per_request: Vec<&RequestRecord> = agg.per_request().iter().collect();
     let (session_count, session_turn_total, session_dropped) = agg.session_stats();
+    let cache = agg.cache_stats();
     serde_json::json!({
         "run_started_at": agg.run_started_at(),
         "scheduled": agg.scheduled(),
@@ -438,6 +575,15 @@ pub fn aggregator_to_json(agg: &MetricsAggregator) -> serde_json::Value {
         "session_count": session_count,
         "session_turn_total": session_turn_total,
         "session_dropped": session_dropped,
+        "cache": {
+            "creation_total": cache.cache_creation_total,
+            "hit_total": cache.cache_hit_total,
+            "rate_overall_pct": cache.rate_overall,
+            "rate_turn1_pct": cache.rate_turn1,
+            "rate_turn2plus_pct": cache.rate_turn2plus,
+            "creation_turn1": cache.cache_creation_turn1,
+            "creation_turn2plus": cache.cache_creation_turn2plus,
+        },
         "per_request": per_request,
     })
 }
@@ -458,6 +604,8 @@ mod tests {
             total_duration: Duration::from_micros(us),
             estimated: false,
             response_text: String::new(),
+            cache_creation_input_tokens: 0,
+            cache_hit_input_tokens: 0,
             started_at: chrono::Utc::now(),
             finished_at: chrono::Utc::now(),
         }
@@ -514,7 +662,145 @@ mod tests {
             session_id: None,
             session_turn: None,
             session_continuation: false,
+            cache_creation_input_tokens: 0,
+            cache_hit_input_tokens: 0,
         };
         assert!((rec.tps() - 20.0).abs() < 0.01);
+    }
+
+    /// M6e: an empty aggregator has zero rates and zero totals.
+    #[test]
+    fn cache_stats_empty_aggregator_is_zero() {
+        let agg = MetricsAggregator::new();
+        let c = agg.cache_stats();
+        assert_eq!(c.cache_creation_total, 0);
+        assert_eq!(c.cache_hit_total, 0);
+        assert_eq!(c.rate_overall, 0.0);
+        assert_eq!(c.rate_turn1, 0.0);
+        assert_eq!(c.rate_turn2plus, 0.0);
+    }
+
+    /// M6e: a single-turn request with cache data lands in the
+    /// overall and turn-1 buckets but NOT turn-2+.
+    #[test]
+    fn cache_stats_single_turn_lands_in_turn1_bucket() {
+        let mut agg = MetricsAggregator::new();
+        let mut m = RequestMetrics {
+            prompt_tokens: 100,
+            cache_creation_input_tokens: 80,
+            cache_hit_input_tokens: 0,
+            ..RequestMetrics::default()
+        };
+        m.status = 200;
+        agg.record_completed(&m, 0, &CompletionContext::none());
+        let c = agg.cache_stats();
+        assert_eq!(c.cache_creation_total, 80);
+        assert_eq!(c.cache_hit_total, 0);
+        // turn 1 sees all 100 prompt tokens but 0 hits → 0%
+        assert_eq!(c.rate_turn1, 0.0);
+        // No turn-2+ requests were observed → 0%
+        assert_eq!(c.rate_turn2plus, 0.0);
+        assert_eq!(c.rate_overall, 0.0);
+    }
+
+    /// M6e: a 2-turn session with turn 1 = miss and turn 2 = hit
+    /// should produce ~50% overall, 0% turn 1, 100% turn 2+.
+    #[test]
+    fn cache_stats_two_turn_session_splits_by_turn() {
+        let mut agg = MetricsAggregator::new();
+        // Turn 1: 100 prompt tokens, 0 cache hit, 100 cache_creation.
+        let mut m1 = RequestMetrics {
+            prompt_tokens: 100,
+            cache_creation_input_tokens: 100,
+            cache_hit_input_tokens: 0,
+            ..RequestMetrics::default()
+        };
+        m1.status = 200;
+        let ctx1 = CompletionContext::turn("s1", 1, false);
+        agg.record_completed(&m1, 0, &ctx1);
+        // Turn 2: 100 prompt tokens, 100 cache hit, 0 cache_creation.
+        let mut m2 = RequestMetrics {
+            prompt_tokens: 100,
+            cache_creation_input_tokens: 0,
+            cache_hit_input_tokens: 100,
+            ..RequestMetrics::default()
+        };
+        m2.status = 200;
+        let ctx2 = CompletionContext::turn("s1", 2, true);
+        agg.record_completed(&m2, 0, &ctx2);
+        // Mark the session as finished so session_count reflects it
+        // (cache tests don't care, but we don't want to leak).
+        agg.record_session_finished(false);
+
+        let c = agg.cache_stats();
+        assert_eq!(c.cache_creation_total, 100);
+        assert_eq!(c.cache_hit_total, 100);
+        // 100 / 200 = 50%
+        assert!((c.rate_overall - 50.0).abs() < 1e-6, "got {}", c.rate_overall);
+        assert_eq!(c.rate_turn1, 0.0);
+        // 100 / 100 = 100%
+        assert!((c.rate_turn2plus - 100.0).abs() < 1e-6, "got {}", c.rate_turn2plus);
+        // creation split: 100 on turn 1, 0 on turn 2+
+        assert_eq!(c.cache_creation_turn1, 100);
+        assert_eq!(c.cache_creation_turn2plus, 0);
+        // hit split: 0 on turn 1, 100 on turn 2+
+        assert_eq!(c.cache_hit_turn1, 0);
+        assert_eq!(c.cache_hit_turn2plus, 100);
+    }
+
+    /// M6e: a request with `prompt_tokens == 0` (e.g. an error
+    /// or an HTTP failure) must NOT contribute to the rate
+    /// denominator. Otherwise a flood of 0-token errors would
+    /// skew the cache hit rate.
+    #[test]
+    fn cache_stats_zero_prompt_tokens_does_not_pollute_rate() {
+        let mut agg = MetricsAggregator::new();
+        let mut m = RequestMetrics {
+            prompt_tokens: 0,
+            cache_hit_input_tokens: 0,
+            ..RequestMetrics::default()
+        };
+        m.status = 500;
+        m.error = Some("oops".into());
+        agg.record_completed(&m, 0, &CompletionContext::none());
+        let c = agg.cache_stats();
+        // The error request has 0 prompt and 0 hit; it should not
+        // contribute to the denominator.
+        assert_eq!(c.rate_overall, 0.0);
+        assert_eq!(c.prompt_turn1, 0);
+        assert_eq!(c.prompt_turn2plus, 0);
+    }
+
+    /// M6e: reloading from a `RequestRecord` set (the
+    /// `from_records` path used by `compare` and `report` from
+    /// disk) must re-aggregate cache stats correctly. This is
+    /// the only path that calls `push_record_clone`.
+    #[test]
+    fn cache_stats_from_records_replays_per_turn_buckets() {
+        // Simulate "save then reload": build the records, then
+        // rebuild an aggregator from them.
+        let mut saved = Vec::new();
+        for turn in 1u32..=2 {
+            let m = RequestMetrics {
+                prompt_tokens: 100,
+                cache_creation_input_tokens: if turn == 1 { 100 } else { 0 },
+                cache_hit_input_tokens: if turn == 1 { 0 } else { 100 },
+                status: 200,
+                ..RequestMetrics::default()
+            };
+            let rec = RequestRecord::from_metrics(
+                &m,
+                &CompletionContext::turn("s1", turn, turn > 1),
+            );
+            saved.push(rec);
+        }
+        let reloaded = MetricsAggregator::from_records(&saved);
+        let c = reloaded.cache_stats();
+        assert_eq!(c.cache_creation_total, 100);
+        assert_eq!(c.cache_hit_total, 100);
+        assert_eq!(c.cache_creation_turn1, 100);
+        assert_eq!(c.cache_creation_turn2plus, 0);
+        assert_eq!(c.cache_hit_turn1, 0);
+        assert_eq!(c.cache_hit_turn2plus, 100);
     }
 }
