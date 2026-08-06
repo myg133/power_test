@@ -69,7 +69,7 @@ pub fn render_html_with_compare(
 <head>
   <meta charset="utf-8">
   <title>{title}</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script>{chart_js}</script>
   <style>
     :root {{
       --bg: #0e1116;
@@ -93,6 +93,7 @@ pub fn render_html_with_compare(
     .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
     h1 {{ margin: 0 0 8px 0; font-size: 24px; }}
     h2 {{ margin: 32px 0 12px 0; font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }}
+    h3 {{ margin: 16px 0 8px 0; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500; }}
     .sub {{ color: var(--muted); margin-bottom: 24px; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }}
     .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }}
@@ -145,7 +146,7 @@ pub fn render_html_with_compare(
 <body>
   <div class="wrap">
     <h1>power_test report</h1>
-    <div class="sub">run <code>{run_id}</code>{tag_html} · started <code>{started}</code>{interrupted_html}</div>
+    <div class="sub">run <code>{run_id}</code> · started <code>{started}</code>{interrupted}</div>
 
     {compare_panel}
 
@@ -161,13 +162,37 @@ pub fn render_html_with_compare(
     </div>
 
     <h2>Configuration</h2>
+
+    <h3>Run identity</h3>
     <table>
       <tbody>
-        <tr><td>Load pattern</td><td><code>{pattern_name}</code>{pattern_detail}</td></tr>
-        <tr><td>Dataset</td><td><code>{dataset_name}</code> · strategy <code>{strategy}</code>{dataset_detail}</td></tr>
-        <tr><td>Prompt tokens</td><td>{prompt_count} prompts · min <strong>{prompt_min}</strong> · mean <strong>{prompt_mean:.1}</strong> · max <strong>{prompt_max}</strong></td></tr>
+        <tr><td>Run id</td><td><code>{run_id_html}</code></td></tr>
+        <tr><td>Tag</td><td>{tag_html}</td></tr>
+        <tr><td>Started</td><td><code>{started}</code></td></tr>
+        <tr><td>Target</td><td><code style="word-break:break-all;">{target}</code></td></tr>
+        <tr><td>API</td><td><code>{api}</code></td></tr>
+        <tr><td>Model</td><td><code>{model}</code> {model_alias_inline}</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Load</h3>
+    <table>
+      <tbody>
+        <tr><td>Pattern</td><td><code>{pattern_name}</code>{pattern_detail}</td></tr>
+        <tr><td>Target RPS</td><td>{target_rps:.2}</td></tr>
+        <tr><td>Duration</td><td>{duration}s</td></tr>
         <tr><td>Concurrency</td><td>{concurrency}</td></tr>
-        {model_alias_row}
+        <tr><td>Stream</td><td>{stream}</td></tr>
+        <tr><td>Max tokens</td><td>{max_tokens}</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Dataset</h3>
+    <table>
+      <tbody>
+        <tr><td>Kind</td><td><code>{dataset_name}</code> · strategy <code>{strategy}</code></td></tr>
+        <tr><td>Source</td><td><code style="word-break:break-all;">{dataset_source}</code></td></tr>
+        <tr><td>Prompt tokens</td><td>{prompt_count} prompts · min <strong>{prompt_min}</strong> · mean <strong>{prompt_mean:.1}</strong> · max <strong>{prompt_max}</strong></td></tr>
       </tbody>
     </table>
 
@@ -199,6 +224,16 @@ pub fn render_html_with_compare(
 
   <script id="metrics-data" type="application/json">{data_json}</script>
   <script>
+    // M6i: defer chart construction until the window's
+    // `load` event fires so the grid layout has computed
+    // final canvas dimensions. The previous eager
+    // `new Chart(canvas, ...)` calls in the body footer
+    // ran before layout in some headless renderers
+    // (canvas size 0 → chart drew nothing visible).
+    // Real browsers were usually fine but the symptom
+    // surfaced during the qwen36 multi-turn screenshot
+    // validation.
+    window.addEventListener('load', function() {{
     const DATA = JSON.parse(document.getElementById('metrics-data').textContent);
     const palette = ['#58a6ff', '#3fb950', '#d29922', '#a371f7', '#f85149', '#8b949e'];
     const chartFont = {{ size: 12 }};
@@ -279,24 +314,54 @@ pub fn render_html_with_compare(
       sel.addEventListener('change', refresh);
       refresh();
     }})();
+    }});  // close window.addEventListener('load', ...)
   </script>
 </body>
 </html>
 "##,
         title = title,
+        // M6i: Configuration is now three subsections
+        // (Run identity / Load / Dataset) — the old
+        // single-table layout crammed the model name, the
+        // alias, the entire dataset path, and the prompt
+        // distribution into one un-grouped list. Each
+        // subsection is its own <h3> + <table> pair.
         run_id = html_escape(&cfg.run_id),
-        tag_html = cfg
-            .tag
-            .as_deref()
-            .map(|t| format!(" · tag <code>{}</code>", html_escape(t)))
-            .unwrap_or_default(),
+        run_id_html = html_escape(&cfg.run_id),
+        tag_html = match cfg.tag.as_deref() {
+            Some(t) if !t.is_empty() => format!("<code>{}</code>", html_escape(t)),
+            _ => r#"<span style="color:var(--muted);font-style:italic;">(no tag)</span>"#.into(),
+        },
         started = cfg.started_at.to_rfc3339(),
-        interrupted_html = if interrupted { " · <span style=\"color:var(--bad)\">interrupted</span>" } else { "" },
-        compare_panel = compare_panel,
+        interrupted = if interrupted { r#" · <span style="color:var(--bad)">interrupted</span>"# } else { "" },
         target = html_escape(&cfg.target),
         model = html_escape(&cfg.model),
-        duration = cfg.duration_secs,
+        api = cfg.api.as_str(),
+        // M6i: alias is now a small badge next to the
+        // model name in the Run identity table, not a
+        // separate row. Avoids two rows for the same
+        // logical concept.
+        model_alias_inline = match cfg.model_alias.as_deref() {
+            Some(a) if !a.is_empty() => format!(
+                r#" <span style="color:var(--muted);font-size:12px;">· alias <code>{}</code> (groups history + compare)</span>"#,
+                html_escape(a)
+            ),
+            _ => String::new(),
+        },
+        pattern_name = cfg.pattern.name(),
+        pattern_detail = html_escape(&format_pattern_detail(&cfg.pattern)),
         target_rps = cfg.target_rps,
+        duration = cfg.duration_secs,
+        concurrency = cfg.concurrency,
+        stream = if cfg.stream { "true" } else { "false" },
+        max_tokens = cfg.max_tokens,
+        dataset_name = cfg.dataset.name(),
+        strategy = cfg.strategy.as_str(),
+        dataset_source = html_escape(&format_dataset_source(cfg)),
+        prompt_count = cfg.prompt_distribution.count,
+        prompt_min = cfg.prompt_distribution.min,
+        prompt_mean = cfg.prompt_distribution.mean,
+        prompt_max = cfg.prompt_distribution.max,
         achieved_rps = achieved_rps,
         success_rate = success_rate,
         success_class = if success_rate >= 99.0 { "good" } else if success_rate < 90.0 { "bad" } else { "" },
@@ -332,31 +397,37 @@ pub fn render_html_with_compare(
         data_json = html_escape(&data_json),
         cache_card = cache_card,
         version = env!("CARGO_PKG_VERSION"),
-        pattern_name = cfg.pattern.name(),
-        pattern_detail = html_escape(&format_pattern_detail(&cfg.pattern)),
-        dataset_name = cfg.dataset.name(),
-        strategy = cfg.strategy.as_str(),
-        dataset_detail = html_escape(&format_dataset_detail(cfg)),
-        prompt_count = cfg.prompt_distribution.count,
-        prompt_min = cfg.prompt_distribution.min,
-        prompt_mean = cfg.prompt_distribution.mean,
-        prompt_max = cfg.prompt_distribution.max,
-        concurrency = cfg.concurrency,
-        model_alias_row = build_model_alias_row(cfg),
+        // M6i: chart.js is inlined so the report is fully
+        // self-contained — works offline, no jsdelivr CDN
+        // dependency. The 200KB UMD bundle is `include_str!`'d
+        // at compile time, so the runtime cost is just the
+        // HTML size. Replace the file in `assets/` to upgrade
+        // chart.js.
+        chart_js = include_str!("../../assets/chart.umd.min.js"),
     )
 }
 
-/// M6g: when a `--model-alias` was set, render an extra row
-/// in the Configuration table showing it. The alias is what
-/// groups this run with its siblings in the history
-/// directory; the actual model name is the row above.
-fn build_model_alias_row(cfg: &RunConfig) -> String {
-    match &cfg.model_alias {
-        Some(alias) if !alias.is_empty() => format!(
-            r#"<tr><td>Model alias</td><td><code>{}</code> <span style="color:var(--muted);font-size:12px;">(groups history + compare)</span></td></tr>"#,
-            html_escape(alias)
-        ),
-        _ => String::new(),
+/// M6i: the dataset's source string for the Configuration
+/// table. For `literal` / `token-budget` / `built-in` we
+/// show a short description; for `sharegpt` / `custom` we
+/// show the file path so the user can find it. The old
+/// `format_dataset_detail` had a leading " · " and
+/// quoted a 40-char preview, which produced noisy
+/// output for path-based datasets.
+fn format_dataset_source(cfg: &RunConfig) -> String {
+    use crate::config::DatasetSpec;
+    match &cfg.dataset {
+        DatasetSpec::Literal { text } => {
+            let preview: String = text.chars().take(80).collect();
+            let suffix = if text.chars().count() > 80 { "..." } else { "" };
+            format!("literal prompt: \"{preview}{suffix}\"")
+        }
+        DatasetSpec::TokenBudget { target_tokens } => {
+            format!("token-budget: ~{target_tokens} tokens")
+        }
+        DatasetSpec::Builtin => "built-in: hardcoded 12-prompt pool (mixed English + Chinese)".into(),
+        DatasetSpec::ShareGpt { path } => format!("sharegpt file: {}", path.display()),
+        DatasetSpec::Custom { path } => format!("custom file: {}", path.display()),
     }
 }
 
@@ -547,24 +618,6 @@ fn format_pattern_detail(p: &crate::config::LoadPattern) -> String {
     }
 }
 
-/// A short, human-friendly description of a dataset for the report.
-fn format_dataset_detail(cfg: &crate::config::RunConfig) -> String {
-    use crate::config::DatasetSpec;
-    match &cfg.dataset {
-        DatasetSpec::Literal { text } => {
-            let preview: String = text.chars().take(40).collect();
-            let suffix = if text.chars().count() > 40 { "…" } else { "" };
-            format!(" · \"{preview}{suffix}\"")
-        }
-        DatasetSpec::TokenBudget { target_tokens } => {
-            format!(" · ~{target_tokens} tokens")
-        }
-        DatasetSpec::Builtin => " · hardcoded pool (12 prompts)".into(),
-        DatasetSpec::ShareGpt { path } => format!(" · {}", path.display()),
-        DatasetSpec::Custom { path } => format!(" · {}", path.display()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,7 +659,15 @@ mod tests {
         assert!(html.contains("power_test report"));
         assert!(html.contains("test-run"));
         assert!(html.contains("smoke"));
-        assert!(html.contains("cdn.jsdelivr.net"));
+        // M6i: chart.js is inlined (assets/chart.umd.min.js
+        // via include_str!), no CDN. Verify the bundle
+        // landed in the HTML body — the header banner is
+        // the most reliable substring since it appears
+        // in any chart.js version we ship.
+        assert!(
+            html.contains("Chart.js v4.4.0"),
+            "expected chart.js UMD bundle to be inlined in the report"
+        );
         assert!(html.contains("metrics-data"));
     }
 
@@ -720,9 +781,15 @@ mod tests {
             mean: 50.0,
         };
         let html = render_html(&c, &MetricsAggregator::new(), false);
-        assert!(html.contains("Load pattern"));
+        // M6i: Configuration is now three subsections
+        // (Run identity / Load / Dataset). Each gets
+        // its own h3 + table — assert the subsection
+        // headers and the row content rather than the
+        // old single-table "Load pattern" string.
+        assert!(html.contains("<h3>Run identity</h3>"), "missing Run identity subsection");
+        assert!(html.contains("<h3>Load</h3>"), "missing Load subsection");
+        assert!(html.contains("<h3>Dataset</h3>"), "missing Dataset subsection");
         assert!(html.contains(">ramp<"));
-        assert!(html.contains("Dataset"));
         assert!(html.contains(">built-in<"));
         assert!(html.contains("round-robin"));
         assert!(html.contains("Prompt tokens"));
