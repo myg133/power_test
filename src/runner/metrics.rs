@@ -457,6 +457,7 @@ mod tests {
             prompt_tokens: 10,
             total_duration: Duration::from_micros(us),
             estimated: false,
+            response_text: String::new(),
             started_at: chrono::Utc::now(),
             finished_at: chrono::Utc::now(),
         }

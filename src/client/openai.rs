@@ -95,6 +95,11 @@ impl OpenaiClient {
         let mut delta_count: u32 = 0;
         let mut usage_completion: Option<u32> = None;
         let mut usage_prompt: Option<u32> = None;
+        // M6d: collect the visible assistant text (delta.content
+        // only — reasoning_content is NOT echoed back to the model
+        // because most providers treat reasoning as ephemeral
+        // state, not conversation history).
+        let mut response_text = String::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -135,6 +140,14 @@ impl OpenaiClient {
                         let reasoning = delta
                             .and_then(|d| d.get("reasoning_content"))
                             .and_then(|c| c.as_str());
+                        // M6d: only the visible content is echoed back into
+                        // the session. Reasoning is not conversation
+                        // history under most providers' semantics.
+                        if let Some(c) = content {
+                            if !c.is_empty() {
+                                response_text.push_str(c);
+                            }
+                        }
                         let combined: String = match (content, reasoning) {
                             (Some(c), Some(r)) if !c.is_empty() && !r.is_empty() => {
                                 format!("{c}{r}")
@@ -162,6 +175,8 @@ impl OpenaiClient {
         m.completion_tokens = usage_completion.unwrap_or(delta_count);
         m.estimated = usage_completion.is_none();
         m.prompt_tokens = usage_prompt.unwrap_or(0);
+        // M6d: hand the joined assistant text to the session pool.
+        m.response_text = response_text;
         m.total_duration = start.elapsed();
     }
 
@@ -174,6 +189,11 @@ impl OpenaiClient {
                 return;
             }
         };
+        // M6d: collect the assistant text from the first choice's
+        // message.content. We join across choices in case the model
+        // returns multiple (n>1), but for the common n=1 case this
+        // is a single assignment.
+        let mut joined = String::new();
         if let Some(choices) = body.get("choices").and_then(|v| v.as_array()) {
             for choice in choices {
                 if let Some(content) = choice
@@ -181,10 +201,15 @@ impl OpenaiClient {
                     .and_then(|m| m.get("content"))
                     .and_then(|c| c.as_str())
                 {
+                    if !joined.is_empty() {
+                        joined.push('\n');
+                    }
+                    joined.push_str(content);
                     m.completion_tokens += crate::config::estimate_tokens(content);
                 }
             }
         }
+        m.response_text = joined;
         m.estimated = true;
         if let Some(u) = body.get("usage") {
             if let Some(ct) = u.get("completion_tokens").and_then(|v| v.as_u64()) {

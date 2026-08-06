@@ -850,3 +850,149 @@ async fn e2e_static_multi_sends_full_messages_body() {
         .await;
     assert_eq!(m.status, 200, "err={:?}", m.error);
 }
+
+/// M6d: the assistant text extracted from the streamed SSE
+/// `delta.content` chunks must flow into the next turn's
+/// `messages[]` body. We wiremock a 2-turn dynamic session where
+/// turn 1 streams "answer-one" and turn 2 streams "answer-two";
+/// the second turn's request body must contain
+/// `[user, assistant:answer-one, user, …]`.
+#[tokio::test]
+async fn e2e_dynamic_multi_response_text_flows_into_next_turn() {
+    use power_test::dataset::OwnedChatMessage;
+    use power_test::runner::session::{SessionPool, TurnAction};
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // First turn: server returns "answer-one".
+    let turn1_body = concat!(
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer-one\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\
+         \"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    // Second turn: must contain the assistant message from turn 1.
+    // `body_partial_json` matches if the given subset is present;
+    // we only assert on the user→assistant→user shape that proves
+    // the回填 worked.
+    let turn2_body = concat!(
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer-two\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\
+         \"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "first-question"},
+                {"role": "assistant", "content": "answer-one"},
+                {"role": "user", "content": "second-question"}
+            ]
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(turn2_body),
+        )
+        .expect(1)
+        .named("turn-2")
+        .mount(&server)
+        .await;
+    // The first turn is matched by the path/method only — any body
+    // works because we only care that the assistant text gets
+    // extracted.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(turn1_body),
+        )
+        .named("turn-1")
+        .mount(&server)
+        .await;
+
+    let mut cfg = build_config(
+        format!("{}/v1/chat/completions", server.uri()),
+        1,
+    );
+    cfg.api_key = Some("sk-test".into());
+    let client: Arc<dyn power_test::client::LlmClient> =
+        Arc::from(power_test::client::build(&cfg).expect("client builds"));
+
+    let pool = SessionPool::new(2);
+    let item = power_test::dataset::DatasetItem {
+        prompt: "[user] first-question".into(),
+        estimated_prompt_tokens: 1,
+        weight: None,
+        tags: Vec::new(),
+        name: Some("q".into()),
+        messages: Some(vec![OwnedChatMessage::new("user", "first-question")]),
+        follow_ups: vec!["second-question".into()],
+    };
+    let h = pool.acquire_evict_lru(&item).expect("acquire");
+
+    // Turn 1: send seed.
+    let m1 = client
+        .send_messages(item.messages.as_ref().unwrap(), 1)
+        .await;
+    assert_eq!(m1.status, 200, "turn 1 err: {:?}", m1.error);
+    assert_eq!(
+        m1.response_text, "answer-one",
+        "M6d: streaming delta.content must be joined into response_text"
+    );
+    let r1 = h.complete(m1.response_text.clone(), true);
+    assert_eq!(r1.action, TurnAction::Continue);
+
+    // Turn 2: send grown messages + follow-up. The pool's
+    // `messages()` returns the grown list, then we append the
+    // follow-up (this matches what the executor's
+    // `run_dynamic_session` does). The follow-up only lives in
+    // the request body — the session itself doesn't store it
+    // (the assistant turn we just added via `complete` is
+    // the only thing that grows the session).
+    let mut msgs = h.messages();
+    msgs.push(OwnedChatMessage::new("user", "second-question"));
+    let m2 = client.send_messages(&msgs, 1).await;
+    assert_eq!(m2.status, 200, "turn 2 err: {:?}", m2.error);
+    assert_eq!(m2.response_text, "answer-two");
+    // The wiremock `expect(1)` for the second turn would fail if
+    // the body didn't contain the assistant:answer-one entry.
+    // `body_partial_json` matches as a subset, so the test still
+    // passes even when the model also appends reasoning or
+    // tool_use blocks.
+
+    // Mark turn 2 done (no more follow-ups) so the assistant
+    // text is appended to the session. After this, the session
+    // contains: [user:first, assistant:answer-one,
+    // assistant:answer-two]. The follow-up user message only
+    // existed in the request body for the turn it triggered.
+    let r2 = h.complete(m2.response_text.clone(), false);
+    assert_eq!(r2.action, TurnAction::Done);
+    let session_msgs = h.messages();
+    assert_eq!(
+        session_msgs.len(),
+        3,
+        "session should have grown to 3 msgs: {:?}",
+        session_msgs
+    );
+    assert_eq!(session_msgs[0].role, "user");
+    assert_eq!(session_msgs[0].content, "first-question");
+    assert_eq!(session_msgs[1].role, "assistant");
+    assert_eq!(
+        session_msgs[1].content, "answer-one",
+        "M6d: assistant text from turn 1 must be in the session"
+    );
+    assert_eq!(session_msgs[2].role, "assistant");
+    assert_eq!(
+        session_msgs[2].content, "answer-two",
+        "M6d: assistant text from turn 2 must be in the session"
+    );
+}

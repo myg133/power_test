@@ -36,6 +36,14 @@ pub struct RequestMetrics {
     /// `true` when `completion_tokens` is a chunk-count estimate, not from
     /// the model's `usage` field.
     pub estimated: bool,
+    /// M6d: the assistant's response text, joined across all chunks
+    /// (streaming) or copied from the body (non-streaming). Empty
+    /// when the request errored before any text was produced, or
+    /// when the client doesn't surface text (e.g. `RawClient`,
+    /// which has no JSON to read). The session pool feeds this
+    /// back into the next turn's `messages` so the model sees
+    /// the prior assistant response.
+    pub response_text: String,
     /// Wall-clock time the request was issued.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Wall-clock time the request finished.

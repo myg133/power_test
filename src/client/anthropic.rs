@@ -134,6 +134,10 @@ impl AnthropicClient {
         let mut text_delta_count: u32 = 0;
         let mut usage_completion: Option<u32> = None;
         let mut usage_prompt: Option<u32> = None;
+        // M6d: join visible text_delta deltas. thinking_delta is
+        // NOT included — most providers treat reasoning as
+        // ephemeral, not conversation history.
+        let mut response_text = String::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -189,6 +193,20 @@ impl AnthropicClient {
                                 }
                                 last_token_at = Some(now);
                             }
+                            // M6d: only text_delta's text contributes
+                            // to the conversation history. thinking_delta
+                            // is the model's scratchpad and most APIs
+                            // (Anthropic, OpenAI reasoning_content)
+                            // don't echo it back.
+                            if delta_type == Some("text_delta") {
+                                if let Some(t) = parsed
+                                    .get("delta")
+                                    .and_then(|d| d.get("text"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    response_text.push_str(t);
+                                }
+                            }
                         }
                     }
                     EventKind::MessageDelta => {
@@ -214,6 +232,7 @@ impl AnthropicClient {
         m.completion_tokens = usage_completion.unwrap_or(text_delta_count);
         m.estimated = usage_completion.is_none();
         m.prompt_tokens = usage_prompt.unwrap_or(0);
+        m.response_text = response_text;
         m.total_duration = start.elapsed();
     }
 
@@ -226,13 +245,26 @@ impl AnthropicClient {
                 return;
             }
         };
+        // M6d: concatenate the `text` field of every content block
+        // in order. Anthropic's Messages API returns an array of
+        // blocks; the first one is usually `type: "text"` but
+        // tool_use / image blocks can also appear and we just skip
+        // them.
+        let mut joined = String::new();
         if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
             for block in content {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    m.completion_tokens += crate::config::estimate_tokens(text);
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        if !joined.is_empty() {
+                            joined.push('\n');
+                        }
+                        joined.push_str(text);
+                        m.completion_tokens += crate::config::estimate_tokens(text);
+                    }
                 }
             }
         }
+        m.response_text = joined;
         m.estimated = true;
         if let Some(u) = body.get("usage") {
             if let Some(ct) = u.get("output_tokens").and_then(|v| v.as_u64()) {

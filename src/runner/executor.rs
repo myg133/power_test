@@ -359,20 +359,14 @@ async fn run_dynamic_session(
             handle.drop_session();
             return;
         }
-        // Extract the assistant's text from the SSE/non-stream
-        // response. The simplest way: take the prompt-distribution
-        // join, the per-item summary doesn't store the assistant
-        // text, but the streamed content is preserved in
-        // `metrics.completion_tokens` only. To keep M6c tight we
-        // recover a (possibly empty) assistant text from the
-        // request metrics; for OpenAI/Anthropic streaming the
-        // joined delta text would be ideal, but that means a
-        // new client method. For now, we use completion_tokens as
-        // a "the model did emit something" signal and pass an
-        // empty string for the assistant text. The session is
-        // appended-to anyway, so the *next* turn sees a valid
-        // (if content-free) trailing assistant message.
-        let assistant = String::new(); // M6c: stub
+        // M6d: pull the joined assistant text out of the request
+        // metrics. For OpenAI/Anthropic streaming, this is the
+        // concatenation of all `delta.content` (or `text_delta.text`)
+        // chunks. For non-streaming, it's the body's content[0].text
+        // (Anthropic) or choices[0].message.content (OpenAI). For
+        // `RawClient`, the field stays empty — raw HTTP has no JSON
+        // to read and that mode is single-turn anyway.
+        let assistant = m.response_text.clone();
         let follow_ups_remaining = (turn as usize) < total_turns;
         let result = handle.complete(assistant, follow_ups_remaining);
         if result.action == TurnAction::Done {
