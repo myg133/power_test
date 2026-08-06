@@ -1,0 +1,17 @@
+# Rust build output
+/target/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs that are not part of the canonical repo
+*.log
+# Exception: M3 verification evidence is kept under docs/internal/,
+# not as raw log files. The originals are intentionally excluded.
