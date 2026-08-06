@@ -1066,6 +1066,9 @@ mod tests {
             completion_tokens: tokens,
             prompt_tokens: 5,
             estimated: false,
+            session_id: None,
+            session_turn: None,
+            session_continuation: false,
         }
     }
 
@@ -1293,7 +1296,7 @@ mod tests {
         m.ttft = Some(Duration::from_millis(50));
         m.completion_tokens = 10;
         m.itl_samples = vec![Duration::from_millis(10); 5];
-        agg.record_completed(&m, 0);
+        agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
         let cfg = cfg("s", "m", "http://x", 1, 1.0);
         let snap = AggregatorSnapshot::from(&agg, &cfg);
         assert!((snap.achieved_rps - 1.0).abs() < 1e-6);

@@ -1,5 +1,15 @@
 //! The test executor. Owns the semaphore, the load pattern, and the metrics
 //! aggregator. Spawns one worker task per acquired permit.
+//!
+//! M6 adds a mode-aware dispatch on top of the existing single-turn
+//! path. The dispatch is keyed on `dataset.mode()`:
+//!
+//! - `Single`        → `client.send(prompt, …)` (M1-M4 behavior).
+//! - `StaticMulti`   → `client.send_messages(seed_messages, …)` once
+//!                     per item. No session.
+//! - `DynamicMulti`  → session pool. Each item is a chain of
+//!                     serial turns inside its own session. K =
+//!                     `--concurrency`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -8,11 +18,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::sleep;
 
-use super::metrics::MetricsAggregator;
+use super::metrics::{CompletionContext, MetricsAggregator};
 use super::pattern::LoadPattern as DynLoadPattern;
+use super::session::{SessionPool, TurnAction};
 use crate::client::{self, LlmClient};
 use crate::config::{LoadPattern, RunConfig};
-use crate::dataset::{self, Dataset};
+use crate::dataset::{self, Dataset, DatasetMode, OwnedChatMessage};
 use crate::error::{Error, Result};
 
 /// Inputs to [`run`].
@@ -82,6 +93,16 @@ pub async fn run_with_cancel(opts: RunOptions, cancel: Arc<Notify>) -> Result<Ru
         g.set_run_started_at(run_started);
     }
 
+    // M6: pick the dispatch mode up front. The dataset's `mode()`
+    // is determined at load time (TOML profile fail-fast ensures
+    // one file = one mode). The session pool is only created for
+    // `DynamicMulti`; for the other two modes, no extra state.
+    let mode = dataset.mode();
+    let session_pool: Option<Arc<SessionPool>> = match mode {
+        DatasetMode::DynamicMulti => Some(Arc::new(SessionPool::new(cfg.concurrency))),
+        _ => None,
+    };
+
     // Build the pattern. The trait object hides whether we're running
     // constant, ramp, spike, or soak.
     let pattern: Box<dyn DynLoadPattern> = super::pattern::from_config(&cfg.pattern);
@@ -97,6 +118,7 @@ pub async fn run_with_cancel(opts: RunOptions, cancel: Arc<Notify>) -> Result<Ru
         let client = client.clone();
         let dataset = dataset.clone();
         let pattern = pattern.clone();
+        let session_pool = session_pool.clone();
         tokio::spawn(async move {
             scheduler_loop(
                 pattern,
@@ -106,6 +128,8 @@ pub async fn run_with_cancel(opts: RunOptions, cancel: Arc<Notify>) -> Result<Ru
                 start,
                 client,
                 dataset,
+                mode,
+                session_pool,
                 scheduler_cancel,
             )
             .await;
@@ -196,17 +220,13 @@ async fn scheduler_loop(
     start: Arc<Instant>,
     client: Arc<dyn LlmClient>,
     dataset: Arc<dyn Dataset>,
+    mode: DatasetMode,
+    session_pool: Option<Arc<SessionPool>>,
     cancel: Arc<Notify>,
 ) {
     let duration = Duration::from_secs(cfg.duration_secs);
     let mut guard = pattern.lock().await;
     loop {
-        // Belt-and-suspenders: even if `cancel.notified()` was missed
-        // because we were blocked inside `guard.tick()` (Notify has no
-        // stored-permit semantics, so notify_waiters fires only on
-        // currently-registered waiters), check the wall clock here so
-        // the scheduler still exits when the configured duration
-        // elapses.
         if start.elapsed() >= duration {
             break;
         }
@@ -228,15 +248,43 @@ async fn scheduler_loop(
                 let dataset_c = dataset.clone();
                 let agg_c = agg.clone();
                 let start_c = start.clone();
+                let pool_c = session_pool.clone();
                 tokio::spawn(async move {
                     let item = dataset_c.next().await;
                     let second_offset = start_c.elapsed().as_secs();
-                    let m = client_c
-                        .send(&item.prompt, item.estimated_prompt_tokens)
-                        .await;
-                    let mut g = agg_c.lock().unwrap();
-                    g.record_completed(&m, second_offset);
-                    drop(g);
+                    match mode {
+                        DatasetMode::Single => {
+                            let m = client_c
+                                .send(&item.prompt, item.estimated_prompt_tokens)
+                                .await;
+                            let mut g = agg_c.lock().unwrap();
+                            g.record_completed(&m, second_offset, &CompletionContext::none());
+                            drop(g);
+                        }
+                        DatasetMode::StaticMulti => {
+                            // M6: send the full messages array once. The
+                            // dataset loader guarantees item.messages is
+                            // Some(_).
+                            let messages = item.messages.clone().unwrap_or_default();
+                            let m = client_c
+                                .send_messages(&messages, item.estimated_prompt_tokens)
+                                .await;
+                            let mut g = agg_c.lock().unwrap();
+                            g.record_completed(&m, second_offset, &CompletionContext::none());
+                            drop(g);
+                        }
+                        DatasetMode::DynamicMulti => {
+                            // M6: serial-turn session. We hold the
+                            // semaphore permit for the whole session so
+                            // concurrency caps both the number of
+                            // in-flight HTTP calls AND the number of
+                            // parallel sessions — they're 1:1 here.
+                            let pool = pool_c.expect(
+                                "DynamicMulti mode requires a SessionPool",
+                            );
+                            run_dynamic_session(client_c, item, pool, agg_c, second_offset).await;
+                        }
+                    }
                     drop(permit);
                 });
             }
@@ -245,6 +293,94 @@ async fn scheduler_loop(
                 g.record_skipped();
             }
         }
+    }
+}
+
+/// Run a single `DynamicMulti` item: serial turns, with the
+/// session kept in the pool between turns. The semaphore permit
+/// is held for the whole session (so concurrent sessions =
+/// `cfg.concurrency`).
+async fn run_dynamic_session(
+    client: Arc<dyn LlmClient>,
+    item: crate::dataset::DatasetItem,
+    pool: Arc<SessionPool>,
+    agg: Arc<Mutex<MetricsAggregator>>,
+    first_second_offset: u64,
+) {
+    let Some(handle) = pool.acquire_evict_lru(&item) else {
+        // Pool full and LRU eviction didn't fit (shouldn't happen
+        // with `acquire_evict_lru` which always returns Some if
+        // max_sessions > 0). Treat as skipped.
+        let mut g = agg.lock().unwrap();
+        g.record_skipped();
+        return;
+    };
+    let session_id = {
+        let snap = pool.snapshot();
+        snap.last()
+            .map(|s| s.id.clone())
+            .unwrap_or_default()
+    };
+    let mut turn: u32 = 1;
+    let second_offset = first_second_offset;
+    let total_turns = item.follow_ups.len() + 1;
+    loop {
+        // Build the messages we're about to send. On turn 1 it's
+        // the seed; on later turns, append the next follow_up.
+        let mut messages = handle.messages();
+        if turn > 1 {
+            // follow_ups is 0-indexed; turn 2 uses follow_ups[0].
+            let idx = (turn - 2) as usize;
+            if let Some(next) = item.follow_ups.get(idx) {
+                messages.push(OwnedChatMessage::new("user", next.clone()));
+            }
+        }
+        let continuation = turn > 1;
+        let m = client
+            .send_messages(&messages, item.estimated_prompt_tokens)
+            .await;
+        let ctx = CompletionContext::turn(session_id.clone(), turn, continuation);
+        // We just need a `u64` second offset for the aggregator;
+        // reuse the first_second_offset captured before the
+        // session loop. (Per-second bucketing across turns within
+        // a session is not informative; the run-level metrics are
+        // the focus.)
+        {
+            let mut g = agg.lock().unwrap();
+            g.record_completed(&m, second_offset, &ctx);
+        }
+        if !m.is_ok() {
+            // Drop the session and stop the run. The pool's
+            // `acquire_evict_lru` policy means the slot is freed
+            // and could be reused by a new item — but for this
+            // item, the conversation is over.
+            let mut g = agg.lock().unwrap();
+            g.record_session_finished(true);
+            handle.drop_session();
+            return;
+        }
+        // Extract the assistant's text from the SSE/non-stream
+        // response. The simplest way: take the prompt-distribution
+        // join, the per-item summary doesn't store the assistant
+        // text, but the streamed content is preserved in
+        // `metrics.completion_tokens` only. To keep M6c tight we
+        // recover a (possibly empty) assistant text from the
+        // request metrics; for OpenAI/Anthropic streaming the
+        // joined delta text would be ideal, but that means a
+        // new client method. For now, we use completion_tokens as
+        // a "the model did emit something" signal and pass an
+        // empty string for the assistant text. The session is
+        // appended-to anyway, so the *next* turn sees a valid
+        // (if content-free) trailing assistant message.
+        let assistant = String::new(); // M6c: stub
+        let follow_ups_remaining = (turn as usize) < total_turns;
+        let result = handle.complete(assistant, follow_ups_remaining);
+        if result.action == TurnAction::Done {
+            let mut g = agg.lock().unwrap();
+            g.record_session_finished(false);
+            return;
+        }
+        turn += 1;
     }
 }
 

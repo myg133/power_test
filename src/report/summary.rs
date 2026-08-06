@@ -236,7 +236,7 @@ mod tests {
         m.total_duration = Duration::from_millis(50);
         m.ttft = Some(Duration::from_millis(20));
         m.completion_tokens = 5;
-        agg.record_completed(&m, 0);
+        agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
         let text = render_summary(&cfg(), &agg, false);
         assert!(text.contains("p50"));
         assert!(text.contains("tps"));

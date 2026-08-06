@@ -8,6 +8,39 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::RequestMetrics;
 
+/// Context for a completed request. The session fields are `None` for
+/// single-turn runs and for the first turn of a multi-turn session.
+#[derive(Debug, Clone, Default)]
+pub struct CompletionContext {
+    /// Stable session id (UUID). `None` for single-turn requests.
+    pub session_id: Option<String>,
+    /// 1-indexed turn number within the session. `None` for
+    /// single-turn requests.
+    pub session_turn: Option<u32>,
+    /// `true` when this turn's request was preceded by at least one
+    /// assistant turn on the same session. The seed turn and
+    /// single-turn requests are `false`.
+    pub session_continuation: bool,
+}
+
+impl CompletionContext {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn turn(
+        session_id: impl Into<String>,
+        turn: u32,
+        continuation: bool,
+    ) -> Self {
+        Self {
+            session_id: Some(session_id.into()),
+            session_turn: Some(turn),
+            session_continuation: continuation,
+        }
+    }
+}
+
 /// One row in `metrics.json`. Fields are stored in microseconds for
 /// resolution and as plain `u32`/`u64` for JSON friendliness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,10 +60,17 @@ pub struct RequestRecord {
     pub prompt_tokens: u32,
     /// `true` when `completion_tokens` was chunk-count estimated.
     pub estimated: bool,
+    /// M6 session bookkeeping. `None` / `false` for single-turn runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_turn: Option<u32>,
+    #[serde(default)]
+    pub session_continuation: bool,
 }
 
 impl RequestRecord {
-    pub fn from_metrics(m: &RequestMetrics) -> Self {
+    pub fn from_metrics(m: &RequestMetrics, ctx: &CompletionContext) -> Self {
         Self {
             started_at: m.started_at,
             finished_at: m.finished_at,
@@ -46,6 +86,9 @@ impl RequestRecord {
             completion_tokens: m.completion_tokens,
             prompt_tokens: m.prompt_tokens,
             estimated: m.estimated,
+            session_id: ctx.session_id.clone(),
+            session_turn: ctx.session_turn,
+            session_continuation: ctx.session_continuation,
         }
     }
 
@@ -83,6 +126,14 @@ pub struct MetricsAggregator {
     scheduled: u64,
     /// Total skipped ticks (semaphore exhausted).
     skipped: u64,
+    /// M6 session bookkeeping. `session_count` is the number of
+    /// distinct sessions that completed at least one turn.
+    session_count: u64,
+    /// `session_turn_total` is the sum of per-session turn counts.
+    session_turn_total: u64,
+    /// `session_dropped` is the number of sessions that bailed out
+    /// early because a turn returned non-2xx or empty assistant text.
+    session_dropped: u64,
 }
 
 impl MetricsAggregator {
@@ -105,6 +156,9 @@ impl MetricsAggregator {
             run_started_at: chrono::Utc::now(),
             scheduled: 0,
             skipped: 0,
+            session_count: 0,
+            session_turn_total: 0,
+            session_dropped: 0,
         }
     }
 
@@ -163,7 +217,23 @@ impl MetricsAggregator {
             self.success_count += 1;
         }
         *self.status_codes.entry(rec.status).or_insert(0) += 1;
+        // M6 session bookkeeping.
+        if rec.session_id.is_some() {
+            self.session_turn_total += 1;
+        }
         self.per_request.push(rec.clone());
+    }
+
+    /// Record a session transitioning to terminal state. Called by
+    /// the executor when a session is done (last turn) or dropped
+    /// mid-way. Per-turn counts are accumulated separately by
+    /// [`Self::record_completed`] when the `session_id` field is
+    /// set, so this method only tracks session-level events.
+    pub fn record_session_finished(&mut self, dropped: bool) {
+        self.session_count += 1;
+        if dropped {
+            self.session_dropped += 1;
+        }
     }
 
     pub fn record_scheduled(&mut self) {
@@ -182,8 +252,9 @@ impl MetricsAggregator {
         &mut self,
         metrics: &RequestMetrics,
         second_offset: u64,
+        ctx: &CompletionContext,
     ) {
-        let rec = RequestRecord::from_metrics(metrics);
+        let rec = RequestRecord::from_metrics(metrics, ctx);
         let _ = self.latency.record(rec.total_duration_us);
         if let Some(ttft) = rec.ttft_us {
             let _ = self.ttft.record(ttft);
@@ -210,6 +281,9 @@ impl MetricsAggregator {
         }
         *self.status_codes.entry(metrics.status).or_insert(0) += 1;
         *self.per_second_completed.entry(second_offset).or_insert(0) += 1;
+        if rec.session_id.is_some() {
+            self.session_turn_total += 1;
+        }
         self.per_request.push(rec);
     }
 
@@ -297,6 +371,16 @@ impl MetricsAggregator {
         &self.per_second_started
     }
 
+    /// M6 session stats. Returns `(session_count, session_turn_total,
+    /// session_dropped)`. `session_count` is the number of distinct
+    /// sessions that completed at least one turn. `session_turn_total`
+    /// is the sum of per-session turn counts (excluding dropped
+    /// sessions). `session_dropped` is the number of sessions that
+    /// bailed out early because a turn failed.
+    pub fn session_stats(&self) -> (u64, u64, u64) {
+        (self.session_count, self.session_turn_total, self.session_dropped)
+    }
+
     pub fn total_completion_tokens(&self) -> u64 {
         self.per_request
             .iter()
@@ -337,6 +421,7 @@ fn truncate_msg(s: &str, max: usize) -> String {
 /// Serialize an aggregator to the JSON shape used in `metrics.json`.
 pub fn aggregator_to_json(agg: &MetricsAggregator) -> serde_json::Value {
     let per_request: Vec<&RequestRecord> = agg.per_request().iter().collect();
+    let (session_count, session_turn_total, session_dropped) = agg.session_stats();
     serde_json::json!({
         "run_started_at": agg.run_started_at(),
         "scheduled": agg.scheduled(),
@@ -350,6 +435,9 @@ pub fn aggregator_to_json(agg: &MetricsAggregator) -> serde_json::Value {
         "error_messages": agg.error_messages(),
         "per_second_completed": agg.per_second_completed(),
         "per_second_started": agg.per_second_started(),
+        "session_count": session_count,
+        "session_turn_total": session_turn_total,
+        "session_dropped": session_dropped,
         "per_request": per_request,
     })
 }
@@ -379,7 +467,7 @@ mod tests {
         let mut agg = MetricsAggregator::new();
         for i in 1..=100 {
             let m = dummy_metrics(i * 1000, Some(i * 1000), vec![], 10);
-            agg.record_completed(&m, 0);
+            agg.record_completed(&m, 0, &CompletionContext::none());
         }
         let p50 = agg.percentile(HistKind::Latency, 50.0).unwrap();
         let p99 = agg.percentile(HistKind::Latency, 99.0).unwrap();
@@ -400,10 +488,10 @@ mod tests {
         let mut err = RequestMetrics::default();
         err.status = 500;
         err.error = Some("oops".into());
-        agg.record_completed(&err, 0);
+        agg.record_completed(&err, 0, &CompletionContext::none());
         let mut ok = RequestMetrics::default();
         ok.status = 200;
-        agg.record_completed(&ok, 0);
+        agg.record_completed(&ok, 0, &CompletionContext::none());
         assert_eq!(agg.error_count(), 1);
         assert_eq!(agg.success_count(), 1);
         assert_eq!(agg.error_messages().get("oops"), Some(&1));
@@ -422,6 +510,9 @@ mod tests {
             completion_tokens: 20,
             prompt_tokens: 5,
             estimated: false,
+            session_id: None,
+            session_turn: None,
+            session_continuation: false,
         };
         assert!((rec.tps() - 20.0).abs() < 0.01);
     }

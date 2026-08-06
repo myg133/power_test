@@ -99,7 +99,7 @@ mod tests {
         m.status = 200;
         m.total_duration = Duration::from_millis(50);
         m.completion_tokens = 4;
-        agg.record_completed(&m, 0);
+        agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
         let lp = latency_percentiles(&agg);
         assert_eq!(lp.values_ms.len(), 4);
         let sb = status_breakdown(&agg);

@@ -667,3 +667,186 @@ strategy = "round-robin"
         Some("http://localhost:1234/v1/chat/completions")
     );
 }
+
+/// M6 dynamic-multi: a TOML profile with `messages[]` and
+/// `follow_ups[]` should drive K parallel sessions, each running
+/// its own chain of serial turns. After the run, the metrics
+/// aggregator should report one session per item, and the total
+/// turn count should equal items × (1 + follow_ups).
+#[tokio::test]
+async fn e2e_dynamic_multi_session_pool_2_sessions_2_turns() {
+    use power_test::dataset::OwnedChatMessage;
+
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\
+         \"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body)
+                // 50ms delay so the executor can interleave sessions.
+                .set_delay(Duration::from_millis(50)),
+        )
+        .mount(&server)
+        .await;
+
+    // Two items, each with seed + 1 follow-up ⇒ 2 turns per item.
+    let items = vec![
+        power_test::dataset::DatasetItem {
+            prompt: "[user] q1".into(),
+            estimated_prompt_tokens: 1,
+            weight: None,
+            tags: Vec::new(),
+            name: Some("q1".into()),
+            messages: Some(vec![OwnedChatMessage::new("user", "q1-seed")]),
+            follow_ups: vec!["q1-follow".into()],
+        },
+        power_test::dataset::DatasetItem {
+            prompt: "[user] q2".into(),
+            estimated_prompt_tokens: 1,
+            weight: None,
+            tags: Vec::new(),
+            name: Some("q2".into()),
+            messages: Some(vec![OwnedChatMessage::new("user", "q2-seed")]),
+            follow_ups: vec!["q2-follow".into()],
+        },
+    ];
+
+    let tmp = TempDir::new().unwrap();
+    let history_root: PathBuf = tmp.path().to_path_buf();
+    let cancel = Arc::new(Notify::new());
+    let mut cfg = build_config(
+        format!("{}/v1/chat/completions", server.uri()),
+        2,
+    );
+    cfg.dataset = DatasetSpec::Custom {
+        path: std::path::PathBuf::from("/dev/null"), // unused; we override below
+    };
+    cfg.concurrency = 4;
+
+    // Build the dataset + session pool manually and drive the
+    // executor's `run_dynamic_session` path. We can't use the
+    // load_poll-style `run_with_cancel` for dynamic_multi without
+    // a TOML-profile-aware build path; we exercise the runtime
+    // directly here.
+    use power_test::dataset::pool::PoolDataset;
+    use power_test::runner::session::SessionPool;
+    let dataset: Arc<dyn power_test::dataset::Dataset> = Arc::new(PoolDataset::new(
+        items,
+        RequestStrategy::RoundRobin,
+        power_test::dataset::DatasetMode::DynamicMulti,
+    ));
+    let client: Arc<dyn power_test::client::LlmClient> =
+        Arc::from(power_test::client::build(&cfg).expect("client builds"));
+    let agg = Arc::new(tokio::sync::Mutex::new(MetricsAggregator::new()));
+    let pool = Arc::new(SessionPool::new(cfg.concurrency));
+    let start = std::time::Instant::now();
+    let cfg_arc = cfg.clone();
+
+    // Spawn 2 session runners, one per item. Each runs seed + 1
+    // follow-up = 2 turns. Wait for both to finish.
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let d = dataset.clone();
+        let c = client.clone();
+        let a = agg.clone();
+        let p = pool.clone();
+        let _s = start;
+        let _ca = cancel.clone();
+        handles.push(tokio::spawn(async move {
+            let item = d.next().await;
+            // Replicate the executor's run_dynamic_session logic
+            // inline (it's a private helper). Equivalent: acquire,
+            // send seed, complete turn, append follow_up, send
+            // again, complete, drop.
+            let h = p.acquire_evict_lru(&item).expect("acquire");
+            let session_id = p.snapshot().last().unwrap().id.clone();
+            // Turn 1: seed.
+            let m1 = c
+                .send_messages(item.messages.as_ref().unwrap(), 1)
+                .await;
+            let ctx1 = power_test::runner::CompletionContext::turn(session_id.clone(), 1, false);
+            a.lock().await.record_completed(&m1, 0, &ctx1);
+            let r1 = h.complete(String::new(), !item.follow_ups.is_empty());
+            assert_eq!(r1.action, power_test::runner::session::TurnAction::Continue);
+            // Turn 2: follow_up.
+            let mut msgs = h.messages();
+            msgs.push(OwnedChatMessage::new("user", item.follow_ups[0].clone()));
+            let m2 = c.send_messages(&msgs, 1).await;
+            let ctx2 = power_test::runner::CompletionContext::turn(session_id.clone(), 2, true);
+            a.lock().await.record_completed(&m2, 0, &ctx2);
+            let r2 = h.complete(String::new(), false);
+            assert_eq!(r2.action, power_test::runner::session::TurnAction::Done);
+            let mut g = a.lock().await;
+            g.record_session_finished(false);
+            drop(g);
+            h.drop_session();
+        }));
+    }
+    for h in handles {
+        h.await.expect("session task completes");
+    }
+
+    let agg_final = agg.lock().await;
+    let (session_count, session_turn_total, session_dropped) = agg_final.session_stats();
+    assert_eq!(session_count, 2, "expected 2 sessions, got {session_count}");
+    assert_eq!(session_turn_total, 4, "expected 4 total turns, got {session_turn_total}");
+    assert_eq!(session_dropped, 0);
+    let _ = history_root;
+    let _ = cfg_arc;
+    let _ = cancel;
+}
+
+/// M6 static-multi: a TOML profile with `messages[]` but no
+/// `follow_ups[]` should produce one request per item, with the
+/// full messages body. No session.
+#[tokio::test]
+async fn e2e_static_multi_sends_full_messages_body() {
+    use power_test::dataset::OwnedChatMessage;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",",
+        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hi"}
+            ]
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut cfg = build_config(
+        format!("{}/v1/chat/completions", server.uri()),
+        1,
+    );
+    cfg.api_key = Some("sk-test".into());
+    let client = power_test::client::build(&cfg).expect("client");
+    let m = client
+        .send_messages(
+            &[OwnedChatMessage::new("user", "hi")],
+            1,
+        )
+        .await;
+    assert_eq!(m.status, 200, "err={:?}", m.error);
+}

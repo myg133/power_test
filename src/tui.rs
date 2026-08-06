@@ -520,7 +520,7 @@ mod tests {
         m.total_duration = Duration::from_millis(100);
         m.started_at = chrono::Utc::now();
         m.finished_at = chrono::Utc::now();
-        agg.record_completed(&m, 0);
+        agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
         let snap = Snapshot::from_aggregator(&agg, Instant::now(), cfg.duration_secs);
         assert_eq!(snap.total, 1);
         assert_eq!(snap.success, 1);

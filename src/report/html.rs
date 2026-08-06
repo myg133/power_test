@@ -525,13 +525,13 @@ mod tests {
             m.total_duration = Duration::from_millis(42);
             m.ttft = Some(Duration::from_millis(20));
             m.completion_tokens = 7;
-            agg.record_completed(&m, 0);
+            agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
         }
         let mut err = crate::client::RequestMetrics::default();
         err.status = 500;
         err.total_duration = Duration::from_millis(100);
         err.error = Some("boom".into());
-        agg.record_completed(&err, 0);
+        agg.record_completed(&err, 0, &crate::runner::metrics::CompletionContext::none());
         let html = render_html(&cfg(), &agg, false);
         // HdrHistogram rounds to bucket boundaries, so accept anything in 42.0x.
         assert!(
