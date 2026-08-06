@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{RunConfig, RunStatus};
@@ -32,7 +32,15 @@ use crate::runner::{MetricsAggregator, RequestRecord};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub run_id: String,
-    pub timestamp: DateTime<Utc>,
+    /// M6i fix: same as `RunConfig.started_at`, this is
+    /// the local-time wall clock. `power_test list` and
+    /// the index sort by this field, so the user's
+    /// `~/.power_test/history/<model>/` listing will
+    /// match their shell `date`. Was `DateTime<Utc>`
+    /// previously. Old `index.json` files (UTC strings)
+    /// deserialize fine since the wire format is
+    /// identical (ISO 8601).
+    pub timestamp: DateTime<Local>,
     pub target: String,
     /// M6f: model name. `Option` so old `index.json` files
     /// (pre-M6f) still deserialize; the missing field is treated
@@ -429,6 +437,7 @@ mod tests {
         ApiKind, DatasetSpec, LoadPattern, PromptDistribution, PromptSource, RequestStrategy,
         RunConfig,
     };
+    use chrono::Utc;
     use tempfile::TempDir;
 
     fn make_config(run_id: &str) -> RunConfig {
@@ -449,7 +458,7 @@ mod tests {
             concurrency: 32,
             tag: None,
             api_key: None,
-            started_at: Utc::now(),
+            started_at: Local::now(),
             raw_body_file: None,
             raw_content_type: None,
             model_alias: None,

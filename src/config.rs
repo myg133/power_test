@@ -321,7 +321,14 @@ pub struct RunConfig {
     /// Optional: some endpoints (e.g. local ollama) accept unauthenticated
     /// requests.
     pub api_key: Option<String>,
-    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// M6i fix: run's wall-clock start time in the
+    /// host's local timezone. Used by `summary.txt`
+    /// and `report.html`'s "Started" line, and by the
+    /// directory naming. Was `DateTime<Utc>` previously
+    /// which made the report's "Started" line disagree
+    /// with the directory name by 8h for users in
+    /// CN / SG / AU.
+    pub started_at: chrono::DateTime<chrono::Local>,
 
     // -------- M4: raw HTTP client --------
     /// Path to a static body file for `--api raw`. `None` means empty body.
@@ -521,7 +528,7 @@ mod tests {
             concurrency: 256,
             tag: Some("smoke".into()),
             api_key: Some("sk-test".into()),
-            started_at: chrono::Utc::now(),
+            started_at: chrono::Local::now(),
             raw_body_file: None,
             raw_content_type: None,
             model_alias: None,

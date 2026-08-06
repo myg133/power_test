@@ -42,7 +42,7 @@ fn build_config(target: String, duration_secs: u64) -> RunConfig {
         concurrency: 8,
         tag: Some("e2e".into()),
         api_key: None,
-        started_at: chrono::Utc::now(),
+        started_at: chrono::Local::now(),
         raw_body_file: None,
         raw_content_type: None,
         model_alias: None,

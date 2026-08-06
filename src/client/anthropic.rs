@@ -543,7 +543,7 @@ mod tests {
             concurrency: 4,
             tag: None,
             api_key: Some("sk-ant-test".into()),
-            started_at: chrono::Utc::now(),
+            started_at: chrono::Local::now(),
             raw_body_file: None,
             raw_content_type: None,
             model_alias: None,

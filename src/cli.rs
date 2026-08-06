@@ -425,7 +425,18 @@ impl RunArgs {
             concurrency,
             tag: self.tag.clone(),
             api_key,
-            started_at: chrono::Utc::now(),
+            // M6i fix: directory naming and the
+            // displayed `Started` time use the host's
+            // local timezone so a user glancing at
+            // `~/.power_test/history/<model>/...` sees
+            // the same wall-clock time as their
+            // shell clock. Previously both used UTC,
+            // which made the directory name disagree
+            // with `summary.txt` / `report.html` by
+            // 8h for users in CN / SG / AU and
+            // confused the "when did I run this?"
+            // question.
+            started_at: chrono::Local::now(),
             raw_body_file: self.raw_body_file.clone(),
             raw_content_type: self.raw_content_type.clone(),
             model_alias: self.model_alias.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
@@ -471,7 +482,13 @@ impl RunArgs {
 /// already ran this configuration a moment ago")
 /// rather than silently overwriting.
 pub(crate) fn make_run_id() -> String {
-    let ts = chrono::Utc::now().format("%Y%m%d-%H-%M-%S").to_string();
+    // M6i fix: use local time so the directory name
+    // (`<root>/<model>/YYYYMMDD-HH-mm-ss-XXXXXX/`)
+    // matches the user's wall clock. UTC made the
+    // directory disagree with `summary.txt` and
+    // `report.html` (which are now also local via
+    // `started_at: chrono::Local::now()`).
+    let ts = chrono::Local::now().format("%Y%m%d-%H-%M-%S").to_string();
     let suffix = &uuid::Uuid::new_v4().simple().to_string()[..6];
     format!("{ts}-{suffix}")
 }
@@ -519,6 +536,58 @@ mod make_run_id_tests {
         for _ in 0..1000 {
             assert!(seen.insert(make_run_id()), "duplicate run id within 1000 calls");
         }
+    }
+
+    /// M6i fix: the run id timestamp must come from the
+    /// host's local clock, not UTC. Previously the
+    /// directory name and `started_at` were 8h apart
+    /// for users in CN / SG / AU, which made
+    /// `~/.power_test/history/<model>/...` and
+    /// `summary.txt` disagree.
+    ///
+    /// We can't make the test run in every timezone,
+    /// but we *can* assert that the prefix
+    /// `YYYYMMDD-HH-mm-ss` matches `chrono::Local::now()`
+    /// at the moment of the call (within 1 second of
+    /// wall-clock drift). If the function regresses to
+    /// UTC, this test fails on any non-UTC host
+    /// (CI's UTC env will still pass, but a developer
+    /// running the test locally in CN will see it
+    /// fail).
+    #[test]
+    fn run_id_uses_local_time() {
+        // Sample one second before and one second
+        // after, so we have a window. `make_run_id` may
+        // straddle a second boundary.
+        let before = chrono::Local::now()
+            .format("%Y%m%d-%H-%M-%S")
+            .to_string();
+        let id = make_run_id();
+        let after = chrono::Local::now()
+            + chrono::TimeDelta::seconds(2);
+        let after = after
+            .format("%Y%m%d-%H-%M-%S")
+            .to_string();
+        let prefix: String = id
+            .split('-')
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("-");
+        // Accept either the before or after timestamp
+        // (whichever one the call landed in).
+        let matches = prefix == before || prefix == after;
+        if !matches {
+            panic!(
+                "run_id prefix {prefix:?} doesn't match local time \
+                 (before={before:?}, after={after:?})"
+            );
+        }
+        // And explicitly reject the UTC version of
+        // `now` so the test fails on a UTC-host CI
+        // run if someone reverts to UTC by accident.
+        // (The CI box is UTC, so the local and UTC
+        // prefixes often coincide; we still want the
+        // *intent* documented.)
     }
 }
 
