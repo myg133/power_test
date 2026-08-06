@@ -215,16 +215,20 @@ async fn cmd_report(args: ReportArgs) -> Result<()> {
     let aggregator = runner::MetricsAggregator::from_records(&records);
     let interrupted = false; // not persisted in metrics.json in M1
 
-    // Build the compare-with dropdown by scanning for prior runs on the
-    // same target. Each entry links to a pre-rendered compare HTML if
-    // one exists; the inline JS greys out the link otherwise.
-    let compare_links = discover_compare_links(&history_dir, &args.run_id, &config.target);
+    // M6f: compare-with dropdown now lists runs of the SAME MODEL
+    // (not the same target). Comparing two runs of the same
+    // model across RPS / dataset / pattern is the high-value
+    // case; cross-model comparison rarely makes sense.
+    let compare_links =
+        discover_compare_links(&history_dir, &args.run_id, &config.model);
 
     let summary_text = report::render_summary(&config, &aggregator, interrupted);
     let report_html =
         report::render_html_with_compare(&config, &aggregator, interrupted, &compare_links);
 
-    let dir = history_dir.join(&args.run_id);
+    // M6f: write back into the same model-grouped directory
+    // (not the flat `<root>/<run_id>/` path).
+    let dir = storage::run_dir(&history_dir, &config.model, &args.run_id);
     std::fs::write(dir.join("summary.txt"), &summary_text)
         .map_err(|e| Error::io_at(dir.join("summary.txt"), e))?;
     std::fs::write(dir.join("report.html"), &report_html)
@@ -238,7 +242,7 @@ async fn cmd_report(args: ReportArgs) -> Result<()> {
     Ok(())
 }
 
-/// Scan the history dir for runs on the same target as `self_id` and
+/// Scan the history dir for runs of the same model as `self_id` and
 /// return a list of `(other_id, compare_filename)` pairs, newest first.
 /// Each `compare_filename` is the path that `power_test compare --html`
 /// would write; the report's inline JS greys the link out if the file
@@ -247,9 +251,9 @@ async fn cmd_report(args: ReportArgs) -> Result<()> {
 fn discover_compare_links(
     history_dir: &std::path::Path,
     self_id: &str,
-    self_target: &str,
+    self_model: &str,
 ) -> Vec<(String, String)> {
-    let Ok(others) = storage::list_runs_by_target(history_dir, self_target, Some(self_id)) else {
+    let Ok(others) = storage::list_runs_by_model(history_dir, self_model, Some(self_id)) else {
         return Vec::new();
     };
     others

@@ -25,6 +25,7 @@ use crate::client::{self, LlmClient};
 use crate::config::{LoadPattern, RunConfig};
 use crate::dataset::{self, Dataset, DatasetMode, OwnedChatMessage};
 use crate::error::{Error, Result};
+use crate::storage::run_dir;
 
 /// Inputs to [`run`].
 pub struct RunOptions {
@@ -73,7 +74,11 @@ pub async fn run(opts: RunOptions) -> Result<RunOutput> {
 /// per-request errors — those are recorded into the aggregator.
 pub async fn run_with_cancel(opts: RunOptions, cancel: Arc<Notify>) -> Result<RunOutput> {
     let cfg = opts.config.clone();
-    let history_dir = opts.history_dir.join(&cfg.run_id);
+    // M6f: history is grouped by model so the directory listing
+    // is self-documenting. `run_dir` sanitizes the model name
+    // for filesystem use; the original string lives in the
+    // saved config.json for accurate reporting.
+    let history_dir = run_dir(&opts.history_dir, &cfg.model, &cfg.run_id);
     std::fs::create_dir_all(&history_dir)
         .map_err(|e| Error::io_at(&history_dir, e))?;
 

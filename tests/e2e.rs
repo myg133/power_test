@@ -127,7 +127,7 @@ async fn e2e_wiremock_streaming_2s_at_2rps() {
     let output = run_and_save(target, 2, history_root.clone()).await;
 
     // 1. history dir created
-    let dir = history_root.join(&output.run_id);
+    let dir = storage::run_dir(&history_root, &output.config.model, &output.run_id);
     assert!(dir.is_dir(), "history dir should exist at {}", dir.display());
 
     // 2. all four artifacts
@@ -192,7 +192,7 @@ async fn e2e_report_renders_from_saved_metrics() {
     let output = run_and_save(target, 1, history_root.clone()).await;
 
     // Reload from disk
-    let dir = history_root.join(&output.run_id);
+    let dir = storage::run_dir(&history_root, &output.config.model, &output.run_id);
     let metrics_text = std::fs::read_to_string(dir.join("metrics.json")).unwrap();
     let metrics: serde_json::Value = serde_json::from_str(&metrics_text).unwrap();
     let records: Vec<runner::RequestRecord> =
@@ -325,7 +325,7 @@ async fn e2e_ramp_pattern_2s_2_to_8_rps() {
     )
     .expect("save_run succeeds");
 
-    let dir = history_root.join(&output.run_id);
+    let dir = storage::run_dir(&history_root, &output.config.model, &output.run_id);
     assert!(dir.join("config.json").is_file(), "config.json missing");
     let config_text = std::fs::read_to_string(dir.join("config.json")).unwrap();
     let saved: serde_json::Value = serde_json::from_str(&config_text).unwrap();
@@ -480,7 +480,7 @@ async fn e2e_raw_http_with_static_body() {
     )
     .expect("save_run succeeds");
 
-    let dir = history_root.join(&output.run_id);
+    let dir = storage::run_dir(&history_root, &output.config.model, &output.run_id);
     let metrics_text = std::fs::read_to_string(dir.join("metrics.json")).unwrap();
     let metrics: serde_json::Value = serde_json::from_str(&metrics_text).unwrap();
     let per_request = metrics["per_request"].as_array().expect("per_request array");
