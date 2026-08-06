@@ -394,7 +394,20 @@ pub fn render_html_with_compare(
         tps_p99 = fmt_opt(agg.tps_percentile(99.0), 2),
         tps_p999 = fmt_opt(agg.tps_percentile(99.9), 2),
         errors_rows = errors_rows,
-        data_json = html_escape(&data_json),
+        // M6i fix: the JSON payload lives inside
+        // `<script type="application/json">`, which the browser
+        // does not parse as HTML or JS. Running it through
+        // `html_escape` corrupts the JSON — `"` becomes
+        // `&quot;`, `<` becomes `&lt;`, etc. — and the chart
+        // script's `JSON.parse(...)` then fails at position 1
+        // (the first `{` is fine, but the first key's opening
+        // `"` is now `&quot;` which JSON.parse chokes on).
+        // The only HTML-special substring we still need to
+        // guard against is `</script>` itself, which would
+        // prematurely close the data script tag. Escaping
+        // just that substring keeps the JSON valid while
+        // protecting the script element.
+        data_json = data_json.replace("</script>", "<\\/script>"),
         cache_card = cache_card,
         version = env!("CARGO_PKG_VERSION"),
         // M6i: chart.js is inlined so the report is fully
@@ -835,5 +848,94 @@ mod tests {
         assert!(html.contains("Overall"));
         assert!(html.contains("Turn 1"));
         assert!(html.contains("Turn 2+"));
+    }
+
+    /// M6i fix: the JSON data block inside
+    /// `<script type="application/json" id="metrics-data">`
+    /// must be valid JSON. The old code ran the JSON through
+    /// `html_escape`, which turned every `"` into `&quot;`
+    /// and made the chart script's `JSON.parse(...)` fail at
+    /// position 1 ("Expected property name or '}'"). Verify
+    /// the block round-trips through `serde_json::from_str`.
+    #[test]
+    fn metrics_data_block_is_valid_json() {
+        let mut agg = MetricsAggregator::new();
+        let mut m = crate::client::RequestMetrics::default();
+        m.status = 200;
+        m.total_duration = Duration::from_millis(50);
+        m.completion_tokens = 3;
+        agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
+        let html = render_html(&cfg(), &agg, false);
+
+        // Pull the JSON payload out of the data script tag.
+        let marker = r##"<script id="metrics-data" type="application/json">"##;
+        let start = html
+            .find(marker)
+            .expect("metrics-data script tag must exist")
+            + marker.len();
+        let end = html[start..]
+            .find("</script>")
+            .map(|i| start + i)
+            .expect("metrics-data script must close");
+        let payload = &html[start..end];
+        let parsed: serde_json::Value =
+            serde_json::from_str(payload).expect("metrics-data JSON must parse cleanly");
+        // Spot-check a few fields so we don't accidentally pass on
+        // an empty object — the failure mode the user reported was
+        // `JSON.parse` failing on the very first key.
+        assert!(parsed.get("summary").is_some(), "missing 'summary' key");
+        assert!(
+            parsed.get("latencyPercentiles").is_some(),
+            "missing 'latencyPercentiles' key"
+        );
+        // The raw payload must still contain literal `"` characters
+        // (the JSON key delimiters). The old bug escaped them to
+        // `&quot;` and broke parsing.
+        assert!(
+            payload.contains('"'),
+            "metrics-data JSON must contain literal quote characters; \
+             got: {payload}"
+        );
+    }
+
+    /// M6i fix: if a server error string contains `</script>`,
+    /// the data script tag would close prematurely and break
+    /// the rest of the page. Verify we escape that one
+    /// substring while leaving the rest of the JSON intact.
+    #[test]
+    fn metrics_data_block_escapes_closing_script_substring() {
+        let mut agg = MetricsAggregator::new();
+        // The server returned an error string that happens to
+        // contain a `</script>` substring. In a real LLM test
+        // this happens when upstream returns a generic HTML
+        // 5xx error page.
+        let mut m = crate::client::RequestMetrics::default();
+        m.status = 500;
+        m.error = Some(r#"<html><body>oops</body></html> </script> ALERT"#.into());
+        agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
+
+        let html = render_html(&cfg(), &agg, false);
+        let marker = r##"<script id="metrics-data" type="application/json">"##;
+        let start = html
+            .find(marker)
+            .expect("metrics-data script tag must exist")
+            + marker.len();
+        // The substring `</script>` must NOT appear inside the
+        // data block (it would close the data script early).
+        // Find the matching closing tag and ensure it comes
+        // after our data content.
+        let first_close = html[start..]
+            .find("</script>")
+            .expect("data script must have a closing tag");
+        let payload = &html[start..start + first_close];
+        assert!(
+            !payload.contains("</script>"),
+            "metrics-data block must not contain a raw </script> substring; \
+             got: {payload}"
+        );
+        // The payload must still be valid JSON.
+        let parsed: serde_json::Value = serde_json::from_str(payload)
+            .expect("metrics-data JSON must parse even with </script> in error text");
+        assert!(parsed.get("errors").is_some(), "errors key should be present");
     }
 }
