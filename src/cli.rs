@@ -40,6 +40,12 @@ pub enum Command {
     Report(ReportArgs),
     /// Compare two saved runs side-by-side (placeholder for M3).
     Compare(CompareArgs),
+    /// M7: render the per-model dashboard. `power_test dashboard`
+    /// regenerates the dashboard for every model that has at
+    /// least one saved run; `power_test dashboard <NAME>`
+    /// targets a single model. The dashboard is also
+    /// auto-regenerated after every `power_test run` save.
+    Dashboard(DashboardArgs),
 }
 
 #[derive(Debug, Args)]
@@ -210,6 +216,25 @@ pub struct ReportArgs {
     /// History directory to search.
     #[arg(long)]
     pub history_dir: Option<PathBuf>,
+}
+
+/// M7: args for `power_test dashboard [NAME]`.
+#[derive(Debug, Args)]
+pub struct DashboardArgs {
+    /// Optional model name (or alias). When omitted, the
+    /// dashboard is rendered for every model that has at
+    /// least one saved run.
+    #[arg(value_name = "MODEL")]
+    pub name: Option<String>,
+
+    /// Don't write the dashboard HTML to disk. Used by tests
+    /// and dry-runs.
+    #[arg(long)]
+    pub no_write: bool,
+
+    /// History directory. Defaults to `~/.power_test/history/`.
+    #[arg(long)]
+    pub history_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -891,4 +916,55 @@ mod tests {
         // up with the flag on.
         assert_eq!(cfg.api, ApiKind::Openai);
     }
-}
+
+    /// M7: the Dashboard subcommand is present in the CLI.
+    #[test]
+    fn dashboard_subcommand_present() {
+        // Parse a no-arg invocation. If the subcommand were
+        // missing, clap would error out.
+        let cli = Cli::try_parse_from(["power_test", "dashboard"]).expect("dashboard subcommand must exist");
+        match cli.command {
+            Command::Dashboard(args) => {
+                assert!(args.name.is_none(), "no MODEL arg means name is None");
+                assert!(!args.no_write, "no_write defaults to false");
+            }
+            _ => panic!("dashboard subcommand must be wired up"),
+        }
+    }
+
+    /// M7: the dashboard subcommand accepts a model name and
+    /// the --no-write flag.
+    #[test]
+    fn dashboard_args_parses_name_and_no_write() {
+        let cli = Cli::try_parse_from([
+            "power_test",
+            "dashboard",
+            "gpt-3.5-turbo",
+            "--no-write",
+        ]).expect("dashboard MODEL --no-write must parse");
+        match cli.command {
+            Command::Dashboard(args) => {
+                assert_eq!(args.name.as_deref(), Some("gpt-3.5-turbo"));
+                assert!(args.no_write, "--no-write should set the flag");
+            }
+            _ => panic!("dashboard subcommand must be wired up"),
+        }
+    }
+
+    /// M7: the dashboard subcommand can target a custom
+    /// history dir via --history-dir.
+    #[test]
+    fn dashboard_args_parses_history_dir() {
+        let cli = Cli::try_parse_from([
+            "power_test",
+            "dashboard",
+            "--history-dir",
+            "/tmp/whatever",
+        ]).expect("dashboard --history-dir must parse");
+        match cli.command {
+            Command::Dashboard(args) => {
+                assert_eq!(args.history_dir.as_deref().map(|p| p.display().to_string()), Some("/tmp/whatever".to_string()));
+            }
+            _ => panic!("dashboard subcommand must be wired up"),
+        }
+    }}

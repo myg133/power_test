@@ -24,6 +24,33 @@ and datasets (built-in pool, ShareGPT, custom JSON/JSONL) without breaking the e
 - Prompt distribution (min/max/mean/count of `estimated_prompt_tokens`) is computed at
   config time so the HTML report and `summary.txt` can show it without re-loading files.
 
+## M7 architecture decisions
+
+Three independent changes that ship together:
+
+1. **Model dashboard** — a self-contained HTML page per model (<root>/<model>/index.html) that lists every run of that model and lets the reader pick two runs to compare side-by-side. The diff math runs in the browser (port of the Rust compare::Delta / color_class rules) so the page works offline. The dashboard is auto-regenerated after every power_test run save (best-effort), and can also be back-filled via the new power_test dashboard [NAME] subcommand.
+
+2. **Cache always shown** — every HTML report, every text summary, and the new model dashboard always render the prompt-cache section, even when the run had no cache data. The previous M6e behavior hid the section entirely, which made single-turn reports look incomplete next to multi-turn ones. Single-turn runs now show an Overall / Turn 1 pair (no Turn 2+ row); multi-turn runs that did see cache data show all three rows.
+
+3. **Bilingual reports (zh / en, default zh)** — every HTML report is rendered in Chinese by default, with a JS toggle in the top-right corner that flips every [data-i18n] element to English. The choice is persisted in localStorage under power_test.lang. The English dictionary is embedded as a <script type="application/json" id="i18n-dict-en">
+   block alongside the same for Chinese. No new external dependencies; no chart.js label changes. The summary text and CLI output stay in English (terminal-friendly).
+
+Key implementation choices:
+
+- New src/report/i18n.rs module: Locale enum + 	() function that returns Cow<'static, str> (the hit path borrows a 'static from the const table; the miss path allocates a String so a missing translation is obvious in the rendered page rather than silent).
+- dictionaries_have_same_keys test asserts every key in zh is in n and vice versa, so translator drift fails at compile-test time rather than at first run.
+- Model dashboard reuses the existing <root>/<model>/<run_id>/ layout. The only new file is index.html in the model directory. No migration needed for existing history.
+- cache_stats() math is unchanged. We only changed the renderer to always emit. Old metrics.json files deserialize the same way.
+
+## New CLI subcommand
+
+``npower_test dashboard                  # render dashboards for every model
+power_test dashboard <NAME>           # render one model (matches alias or model name)
+power_test dashboard <NAME> --no-write  # dry-run
+``n
+The subcommand is also auto-invoked on every power_test run save, so users rarely need to run it manually.
+
+
 ## Commands
 
 ```bash

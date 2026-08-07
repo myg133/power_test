@@ -1,9 +1,12 @@
 # Rust build output
 /target/
+out/
+results/
 
 # Editor / IDE
 .idea/
 .vscode/
+.zread/
 *.swp
 *.swo
 
@@ -18,4 +21,3 @@ Thumbs.db
 
 # Ad-hoc probe output from manual runs
 *_probe.txt
-

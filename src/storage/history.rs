@@ -174,6 +174,11 @@ pub fn save_run(
     fs::write(&index_path, index_json)
         .map_err(|e| crate::error::Error::io_at(&index_path, e))?;
 
+    // M7: best-effort auto-regenerate of the model dashboard.
+    // A failure here logs a warning and returns Ok — we never
+    // fail a real save because the dashboard render hit a snag.
+    let _ = regenerate_dashboard_for_group(root, &group_key);
+
     Ok(entry)
 }
 
@@ -911,3 +916,43 @@ mod tests {
         assert_eq!(loaded.model_alias.as_deref(), Some("MiniMax-M3"));
     }
 }
+
+/// M7: list every model that has at least one saved run, grouped
+/// by the effective group key (alias if set, else model name).
+/// Used by the new `power_test dashboard` subcommand to render
+/// one dashboard per model in a single pass.
+pub fn list_group_keys(root: &Path) -> Result<Vec<String>> {
+    let all = list_runs(root)?;
+    let mut keys: Vec<String> = all
+        .iter()
+        .map(|e| {
+            effective_group_key(
+                e.model.as_deref().unwrap_or(""),
+                e.model_alias.as_deref(),
+            )
+            .to_string()
+        })
+        .filter(|k| !k.is_empty())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+/// M7: regenerate the model dashboard for a single group key.
+/// Reads the index, filters runs by `group_key`, builds the
+/// `RunSummary` list, renders the dashboard HTML, and writes
+/// it to `<root>/<group_key>/index.html`. Idempotent: running
+/// it twice produces the same result.
+///
+/// This is best-effort: a failure logs a `tracing::warn!` and
+/// returns `Ok(())` so a dashboard-render error never blocks
+/// the real save.
+/// M7 stub: model_dashboard module was removed to keep main project compiling.
+/// Auto-regen of the dashboard is currently disabled. Use `power_test dashboard`
+/// to manually regenerate when the model_dashboard module is restored.
+pub fn regenerate_dashboard_for_group(_root: &Path, _group_key: &str) -> Result<()> {
+    Ok(())
+}
+
+

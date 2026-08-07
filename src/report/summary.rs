@@ -110,6 +110,36 @@ pub fn render_summary(cfg: &RunConfig, agg: &MetricsAggregator, interrupted: boo
     let _ = writeln!(s, "  p99:  {:>10.2}", agg.tps_percentile(99.0));
     let _ = writeln!(s);
 
+    // M8: system-wide throughput + TPOT. These are the
+    // system-level aggregates, distinct from the per-request
+    // TPS histogram above. The new metrics match the
+    // reference report the user is comparing against.
+    let total = agg.total_completion_tokens() + agg.total_prompt_tokens();
+    let _ = writeln!(s, "throughput (system-wide)");
+    let _ = writeln!(s, "-------------------------");
+    if agg.total_streaming_time_secs() > 0.0 {
+        let _ = writeln!(s, "  output tok/s:     {:>10.2}", agg.output_throughput_tps());
+        let _ = writeln!(s, "  total tok/s:      {:>10.2}", agg.total_throughput_tps());
+        let _ = writeln!(s, "  total tokens:     {}", total);
+    } else {
+        let _ = writeln!(s, "  output tok/s:     (no streaming time)");
+        let _ = writeln!(s, "  total tok/s:      (no streaming time)");
+        let _ = writeln!(s, "  total tokens:     {}", total);
+    }
+    let _ = writeln!(s, "  TPOT (ms/token):  {:>10.2}", agg.tpot_ms());
+    let _ = writeln!(s, "  avg input tok:    {:>10.0}", if agg.total_requests() > 0 { agg.total_prompt_tokens() as f64 / agg.total_requests() as f64 } else { 0.0 });
+    let _ = writeln!(s, "  avg output tok:   {:>10.0}", if agg.total_requests() > 0 { agg.total_completion_tokens() as f64 / agg.total_requests() as f64 } else { 0.0 });
+    let _ = writeln!(s, "  avg turns/req:    {:>10.2}", agg.avg_turns_per_request());
+    let (decoded_per_iter, accept_rate) = agg.speculative_stats();
+    if decoded_per_iter > 0.0 || accept_rate > 0.0 {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "speculative decoding");
+        let _ = writeln!(s, "-------------------");
+        let _ = writeln!(s, "  decoded tok/iter: {:>10.2}", decoded_per_iter);
+        let _ = writeln!(s, "  accept rate:     {:>10.1}%", accept_rate);
+    }
+    let _ = writeln!(s);
+
     if !agg.status_codes().is_empty() {
         let _ = writeln!(s, "status codes");
         let _ = writeln!(s, "------------");
@@ -132,14 +162,24 @@ pub fn render_summary(cfg: &RunConfig, agg: &MetricsAggregator, interrupted: boo
         let _ = writeln!(s);
     }
 
-    // M6e: prompt-cache section. Only emitted when the run saw
-    // any cache data — otherwise a single-turn run with no
-    // prompt-cache support would just print "0%" everywhere and
-    // confuse the reader.
+    // M7: always emit the prompt-cache section. The
+    // previous M6e behavior hid it when no data was
+    // observed, but a single-turn OpenAI run with no
+    // cached tokens deserves the same layout as a
+    // multi-turn Anthropic run that did hit the cache.
+    // The headline and per-turn rows show 0% in the
+    // empty case, with a "(no cache observed)" hint
+    // when the run had no data at all.
     let cache = agg.cache_stats();
-    if cache.cache_creation_total > 0 || cache.cache_hit_total > 0 {
-        let _ = writeln!(s, "prompt cache");
-        let _ = writeln!(s, "------------");
+    let no_data = cache.cache_creation_total == 0 && cache.cache_hit_total == 0;
+    let no_continuations = cache.cache_creation_turn2plus == 0
+        && cache.cache_hit_turn2plus == 0
+        && cache.prompt_turn2plus == 0;
+    let _ = writeln!(s, "prompt cache");
+    let _ = writeln!(s, "------------");
+    if no_data {
+        let _ = writeln!(s, "  hit rate:        {:>6.2}%   (no cache observed)", cache.rate_overall);
+    } else {
         let _ = writeln!(
             s,
             "  hit rate:        {:>6.2}%   ({} / {} prompt tokens)",
@@ -147,26 +187,29 @@ pub fn render_summary(cfg: &RunConfig, agg: &MetricsAggregator, interrupted: boo
             cache.cache_hit_total,
             cache.prompt_turn1 + cache.prompt_turn2plus
         );
-        let _ = writeln!(
-            s,
-            "    turn 1:        {:>6.2}%   ({} / {} prompt tokens)",
-            cache.rate_turn1, cache.cache_hit_turn1, cache.prompt_turn1
-        );
+    }
+    let _ = writeln!(
+        s,
+        "    turn 1:        {:>6.2}%   ({} / {} prompt tokens)",
+        cache.rate_turn1, cache.cache_hit_turn1, cache.prompt_turn1
+    );
+    if !no_continuations {
         let _ = writeln!(
             s,
             "    turn 2+:       {:>6.2}%   ({} / {} prompt tokens)",
             cache.rate_turn2plus, cache.cache_hit_turn2plus, cache.prompt_turn2plus
         );
-        let _ = writeln!(
-            s,
-            "  cache creation:  {} tokens (turn 1: {} · turn 2+: {})",
-            cache.cache_creation_total,
-            cache.cache_creation_turn1,
-            cache.cache_creation_turn2plus
-        );
-        let _ = writeln!(s);
+    } else {
+        let _ = writeln!(s, "    turn 2+:       (no continuation turns observed)");
     }
-
+    let _ = writeln!(
+        s,
+        "  cache creation:  {} tokens (turn 1: {} · turn 2+: {})",
+        cache.cache_creation_total,
+        cache.cache_creation_turn1,
+        cache.cache_creation_turn2plus
+    );
+    let _ = writeln!(s);
     s
 }
 
@@ -307,15 +350,26 @@ mod tests {
         assert!(text.contains("12 prompts"));
     }
 
-    /// M6e: a single-turn run with no cache data must NOT emit
-    /// a "prompt cache" section. Otherwise every run would
-    /// print a confusing 0% line.
+    /// M7: a single-turn run with no cache data MUST still
+    /// emit the "prompt cache" section, with a zero state
+    /// and a "no cache observed" hint. The previous M6e
+    /// behavior hid the section entirely, which made
+    /// single-turn reports look incomplete next to
+    /// multi-turn ones.
     #[test]
-    fn summary_omits_cache_section_when_no_data() {
+    fn summary_always_includes_cache_section() {
         let text = render_summary(&cfg(), &MetricsAggregator::new(), false);
         assert!(
-            !text.contains("prompt cache"),
-            "summary should omit cache section when no cache data was observed"
+            text.contains("prompt cache"),
+            "summary should always include the cache section, even when no data was observed"
+        );
+        assert!(
+            text.contains("no cache observed"),
+            "summary should show the 'no cache observed' hint when no data was seen"
+        );
+        assert!(
+            text.contains("(no continuation turns observed)"),
+            "summary should hide the turn 2+ breakdown for single-turn runs"
         );
     }
 

@@ -59,6 +59,13 @@ pub struct RequestMetrics {
     /// different field name). `RawClient` leaves this 0 because
     /// raw HTTP has no JSON to read.
     pub cache_hit_input_tokens: u32,
+    /// M8: speculative decoding stats. Standard OpenAI usage
+    /// does not expose these, so on OpenAI this stays 0.
+    /// vLLM and similar local servers sometimes add
+    /// accepted_prediction_tokens to completion_tokens_details.
+    pub spec_decoded_tok: u32,
+    pub spec_accepted_tok: u32,
+    pub spec_iterations: u32,
     /// Wall-clock time the request was issued.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Wall-clock time the request finished.

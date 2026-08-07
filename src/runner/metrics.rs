@@ -77,6 +77,22 @@ pub struct RequestRecord {
     /// reads it from `usage.prompt_tokens_details.cached_tokens`.
     #[serde(default)]
     pub cache_hit_input_tokens: u32,
+    /// M8: total tokens decoded (including speculatively rejected
+    /// ones) in this request. Zero unless the server exposes
+    /// speculative decoding stats (e.g. vLLM's
+    /// usage.completion_tokens_details.accepted_prediction_tokens
+    /// or Anthropic's usage.cache_creation).
+    #[serde(default)]
+    pub spec_decoded_tok: u32,
+    /// M8: tokens actually accepted from the speculative draft.
+    /// Used to compute the speculative acceptance rate.
+    #[serde(default)]
+    pub spec_accepted_tok: u32,
+    /// M8: number of decode iterations (forward passes) used
+    /// to produce the response. Used to compute decoded-tokens
+    /// per iteration.
+    #[serde(default)]
+    pub spec_iterations: u32,
 }
 
 impl RequestRecord {
@@ -101,6 +117,9 @@ impl RequestRecord {
             session_continuation: ctx.session_continuation,
             cache_creation_input_tokens: m.cache_creation_input_tokens,
             cache_hit_input_tokens: m.cache_hit_input_tokens,
+            spec_decoded_tok: m.spec_decoded_tok,
+            spec_accepted_tok: m.spec_accepted_tok,
+            spec_iterations: m.spec_iterations,
         }
     }
 
@@ -483,6 +502,116 @@ impl MetricsAggregator {
         self.per_request.iter().map(|r| r.prompt_tokens as u64).sum()
     }
 
+    /// M8: total streaming time across successful requests,
+    /// measured in seconds. The streaming time is the
+    /// total_duration_us of each request (which already
+    /// includes the TTFT and all inter-token latencies).
+    pub fn total_streaming_time_secs(&self) -> f64 {
+        self.per_request
+            .iter()
+            .filter(|r| r.status >= 200 && r.status < 300)
+            .map(|r| r.total_duration_us as f64 / 1_000_000.0)
+            .sum()
+    }
+
+    /// M8: TPOT (Time Per Output Token) in milliseconds, averaged
+    /// across all requests. Computed as
+    /// (sum of (latency - ttft) for requests with >= 2 tokens) /
+    /// (sum of (tokens - 1) for those requests). The -1
+    /// accounts for the first token being already accounted
+    /// for by the TTFT.
+    pub fn tpot_ms(&self) -> f64 {
+        let mut total_gen_us: u64 = 0;
+        let mut total_step_tokens: u64 = 0;
+        for r in &self.per_request {
+            if r.completion_tokens < 2 {
+                continue;
+            }
+            let ttft = r.ttft_us.unwrap_or(0);
+            if (r.total_duration_us as u128) < (ttft as u128) {
+                continue;
+            }
+            total_gen_us = total_gen_us.saturating_add(
+                r.total_duration_us.saturating_sub(ttft),
+            );
+            total_step_tokens = total_step_tokens
+                .saturating_add(r.completion_tokens.saturating_sub(1) as u64);
+        }
+        if total_step_tokens == 0 {
+            0.0
+        } else {
+            (total_gen_us as f64 / 1000.0) / total_step_tokens as f64
+        }
+    }
+
+    /// M8: system-wide output throughput in tokens per second.
+    /// total_completion_tokens / total_streaming_time.
+    /// Returns 0 if there was no streaming time.
+    pub fn output_throughput_tps(&self) -> f64 {
+        let secs = self.total_streaming_time_secs();
+        if secs > 0.0 {
+            self.total_completion_tokens() as f64 / secs
+        } else {
+            0.0
+        }
+    }
+
+    /// M8: system-wide total throughput (input + output) in
+    /// tokens per second.
+    pub fn total_throughput_tps(&self) -> f64 {
+        let secs = self.total_streaming_time_secs();
+        if secs > 0.0 {
+            (self.total_completion_tokens() + self.total_prompt_tokens()) as f64
+                / secs
+        } else {
+            0.0
+        }
+    }
+
+    /// M8: average number of session turns per request. For
+    /// single-turn runs this is 1.0 (every request has one
+    /// turn). For multi-turn it can be > 1.
+    pub fn avg_turns_per_request(&self) -> f64 {
+        let total = self.total_requests() as f64;
+        if total > 0.0 {
+            self.session_turn_total as f64 / total
+        } else {
+            0.0
+        }
+    }
+
+    /// M8: speculative decoding stats. Sum across all requests,
+    /// exposed as (decoded_per_iter, accept_rate).
+    /// decoded_per_iter is the average number of tokens produced
+    /// per decode iteration (sum_spec_decoded / sum_spec_iterations).
+    /// accept_rate is the fraction of drafted tokens that were
+    /// accepted (sum_spec_accepted / sum_spec_decoded).
+    /// Returns (0.0, 0.0) when no speculative fields are populated.
+    pub fn speculative_stats(&self) -> (f64, f64) {
+        let mut total_decoded: u64 = 0;
+        let mut total_iterations: u64 = 0;
+        let mut total_accepted: u64 = 0;
+        for r in &self.per_request {
+            total_decoded = total_decoded
+                .saturating_add(r.spec_decoded_tok as u64);
+            total_iterations = total_iterations
+                .saturating_add(r.spec_iterations as u64);
+            total_accepted = total_accepted
+                .saturating_add(r.spec_accepted_tok as u64);
+        }
+        let decoded_per_iter = if total_iterations > 0 {
+            total_decoded as f64 / total_iterations as f64
+        } else {
+            0.0
+        };
+        let accept_rate = if total_decoded > 0 {
+            100.0 * total_accepted as f64 / total_decoded as f64
+        } else {
+            0.0
+        };
+        (decoded_per_iter, accept_rate)
+    }
+
     /// M6h: copy the run-level counters that
     /// `push_record_clone` does NOT already cover, from
     /// `other` into `self`. Used by the executor's
@@ -594,6 +723,7 @@ pub fn aggregator_to_json(agg: &MetricsAggregator) -> serde_json::Value {
     let per_request: Vec<&RequestRecord> = agg.per_request().iter().collect();
     let (session_count, session_turn_total, session_dropped) = agg.session_stats();
     let cache = agg.cache_stats();
+    let (spec_decoded_per_iter, spec_accept_rate) = agg.speculative_stats();
     serde_json::json!({
         "run_started_at": agg.run_started_at(),
         "scheduled": agg.scheduled(),
@@ -610,6 +740,17 @@ pub fn aggregator_to_json(agg: &MetricsAggregator) -> serde_json::Value {
         "session_count": session_count,
         "session_turn_total": session_turn_total,
         "session_dropped": session_dropped,
+        // M8: derived metrics
+        "avg_latency_ms": if agg.total_requests() > 0 {
+            agg.per_request.iter().map(|r| r.total_duration_us as f64).sum::<f64>()
+                / (agg.total_requests() as f64 * 1000.0)
+        } else { 0.0 },
+        "tpot_ms": agg.tpot_ms(),
+        "output_throughput_tps": agg.output_throughput_tps(),
+        "total_throughput_tps": agg.total_throughput_tps(),
+        "avg_turns_per_request": agg.avg_turns_per_request(),
+        "spec_decoded_per_iter": spec_decoded_per_iter,
+        "spec_accept_rate": spec_accept_rate,
         "cache": {
             "creation_total": cache.cache_creation_total,
             "hit_total": cache.cache_hit_total,
@@ -894,4 +1035,136 @@ mod tests {
         assert_eq!(fresh.cache_creation_total, 50);
         assert_eq!(fresh.cache_hit_total, 210);
     }
+
+    // ---- M8 tests ----
+
+    /// M8: TPOT for 2 requests, 100 output tokens each, 200ms
+    /// total latency each with 50ms TTFT. Streaming time per
+    /// request is 150ms. Per request TPOT = 150ms / 99 step
+    /// tokens = ~1.515ms. Average over 2 requests = same.
+    #[test]
+    fn tpot_ms_average_over_requests() {
+        let mut agg = MetricsAggregator::new();
+        for _ in 0..2 {
+            let m = RequestMetrics {
+                status: 200,
+                total_duration: Duration::from_millis(200),
+                ttft: Some(Duration::from_millis(50)),
+                completion_tokens: 100,
+                prompt_tokens: 10,
+                ..RequestMetrics::default()
+            };
+            agg.record_completed(&m, 0, &CompletionContext::none());
+        }
+        let tpot = agg.tpot_ms();
+        assert!(tpot > 1.4 && tpot < 1.6, "tpot = {} (expected ~1.5)", tpot);
+    }
+
+    /// M8: TPOT is 0 when no request has 2+ completion tokens.
+    #[test]
+    fn tpot_ms_zero_for_short_responses() {
+        let mut agg = MetricsAggregator::new();
+        for _ in 0..3 {
+            let m = RequestMetrics {
+                status: 200,
+                total_duration: Duration::from_millis(100),
+                ttft: Some(Duration::from_millis(50)),
+                completion_tokens: 1,
+                ..RequestMetrics::default()
+            };
+            agg.record_completed(&m, 0, &CompletionContext::none());
+        }
+        assert_eq!(agg.tpot_ms(), 0.0);
+    }
+
+    /// M8: output_throughput = total_completion_tokens / time.
+    #[test]
+    fn output_throughput_matches_total_per_sec() {
+        let mut agg = MetricsAggregator::new();
+        let m = RequestMetrics {
+            status: 200,
+            total_duration: Duration::from_millis(1000),
+            ttft: Some(Duration::from_millis(100)),
+            completion_tokens: 1000,
+            prompt_tokens: 100,
+            ..RequestMetrics::default()
+        };
+        agg.record_completed(&m, 0, &CompletionContext::none());
+        let t = agg.output_throughput_tps();
+        assert!((t - 1000.0).abs() < 0.1, "got {} tok/s", t);
+    }
+
+    /// M8: total_throughput = (prompt + completion) / time.
+    #[test]
+    fn total_throughput_includes_prompt() {
+        let mut agg = MetricsAggregator::new();
+        let m = RequestMetrics {
+            status: 200,
+            total_duration: Duration::from_millis(1000),
+            ttft: Some(Duration::from_millis(100)),
+            completion_tokens: 500,
+            prompt_tokens: 500,
+            ..RequestMetrics::default()
+        };
+        agg.record_completed(&m, 0, &CompletionContext::none());
+        let t = agg.total_throughput_tps();
+        assert!((t - 1000.0).abs() < 0.1, "got {} tok/s", t);
+    }
+
+    /// M8: avg_turns_per_request = session_turn_total / total.
+    #[test]
+    fn avg_turns_per_request_basic() {
+        let mut agg = MetricsAggregator::new();
+        for _ in 0..3 {
+            let m = RequestMetrics {
+                status: 200,
+                total_duration: Duration::from_millis(100),
+                completion_tokens: 1,
+                ..RequestMetrics::default()
+            };
+            agg.record_completed(&m, 0, &CompletionContext::none());
+        }
+        assert!((agg.avg_turns_per_request() - 1.0).abs() < 1e-9);
+
+        for t in 1u32..=3 {
+            let m = RequestMetrics {
+                status: 200,
+                total_duration: Duration::from_millis(100),
+                completion_tokens: 5,
+                ..RequestMetrics::default()
+            };
+            agg.record_completed(&m, 0, &CompletionContext::turn("s1", t, t > 1));
+        }
+        // 3 single + 3 multi = 6 reqs, 6 turns total => 1.0
+        assert!((agg.avg_turns_per_request() - 1.0).abs() < 1e-9);
+    }
+
+    /// M8: speculative_stats returns (0, 0) when no spec data.
+    #[test]
+    fn speculative_stats_zero_by_default() {
+        let agg = MetricsAggregator::new();
+        let (d, a) = agg.speculative_stats();
+        assert_eq!(d, 0.0);
+        assert_eq!(a, 0.0);
+    }
+
+    /// M8: speculative_stats computes decoded/iter and accept rate.
+    #[test]
+    fn speculative_stats_with_data() {
+        let mut agg = MetricsAggregator::new();
+        let m = RequestMetrics {
+            status: 200,
+            total_duration: Duration::from_millis(100),
+            completion_tokens: 10,
+            spec_decoded_tok: 20,
+            spec_accepted_tok: 8,
+            spec_iterations: 4,
+            ..RequestMetrics::default()
+        };
+        agg.record_completed(&m, 0, &CompletionContext::none());
+        let (d, a) = agg.speculative_stats();
+        assert!((d - 5.0).abs() < 1e-9, "got {}", d);
+        assert!((a - 40.0).abs() < 1e-9, "got {}", a);
+    }
+
 }

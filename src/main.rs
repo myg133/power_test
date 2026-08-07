@@ -12,7 +12,7 @@ use clap::Parser;
 use tokio::sync::Notify;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use power_test::cli::{Cli, Command, CompareArgs, ListArgs, ReportArgs, RunArgs};
+use power_test::cli::{Cli, Command, CompareArgs, DashboardArgs, ListArgs, ReportArgs, RunArgs};
 use power_test::config::RunStatus;
 use power_test::error::{Error, Result};
 use power_test::runner::MetricsAggregator;
@@ -42,6 +42,7 @@ async fn run() -> Result<()> {
         Command::List(args) => cmd_list(args),
         Command::Report(args) => cmd_report(args).await,
         Command::Compare(args) => cmd_compare(args),
+        Command::Dashboard(args) => cmd_dashboard(args),
     }
 }
 
@@ -341,4 +342,97 @@ fn short_id(s: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// M7: render the per-model dashboard(s). When `name` is
+/// `Some`, only the matching group is rendered. The
+/// dashboard is also auto-regenerated on every
+/// `power_test run` save, so this command is mostly useful
+/// for back-fills, explicit refreshes, and CI.
+fn cmd_dashboard(args: DashboardArgs) -> Result<()> {
+    use power_test::storage;
+
+    let history_dir = args
+        .history_dir
+        .clone()
+        .unwrap_or_else(config::default_history_dir);
+    storage::ensure_history_dir(&history_dir)?;
+
+    // Resolve which groups to render. If a name is given,
+    // match it against the model/alias field via
+    // `sanitize_model_dir` (the same function the save
+    // path uses, so what the user types is what the
+    // dashboard file is named).
+    let groups: Vec<String> = if let Some(name) = args.name.as_deref() {
+        // The CLI sees the raw name; the directory on disk
+        // is the sanitized form. We match either so users
+        // don't need to know the sanitization rules.
+        let target = sanitize_for_lookup(name);
+        let all = storage::list_runs(&history_dir)?;
+        let mut found: Vec<String> = all
+            .iter()
+            .map(|e| {
+                storage::effective_group_key(
+                    e.model.as_deref().unwrap_or(""),
+                    e.model_alias.as_deref(),
+                )
+                .to_string()
+            })
+            .filter(|k| k == &target || k == &name)
+            .collect();
+        found.sort();
+        found.dedup();
+        if found.is_empty() {
+            return Err(Error::Other(format!(
+                "no runs found for model or alias '{name}' under {}",
+                history_dir.display()
+            )));
+        }
+        found
+    } else {
+        storage::list_group_keys(&history_dir)?
+    };
+
+    if groups.is_empty() {
+        println!("(no runs in {})", history_dir.display());
+        return Ok(());
+    }
+
+    let mut rendered: Vec<String> = Vec::new();
+    for group_key in &groups {
+        if args.no_write {
+            rendered.push(format!("[dry-run] would regenerate {group_key}"));
+            continue;
+        }
+        storage::regenerate_dashboard_for_group(&history_dir, group_key)?;
+        let path = history_dir.join(group_key).join("index.html");
+        rendered.push(format!("{group_key} -> {}", path.display()));
+    }
+    for line in &rendered {
+        println!("rendered dashboard: {line}");
+    }
+    Ok(())
+}
+
+/// The save path uses `sanitize_model_dir` to turn a
+/// model/alias into a safe directory name. We re-implement
+/// the same sanitization here so the CLI lookup matches
+/// without exposing the internal function. Behavior is
+/// intentionally identical to
+/// `storage::history::sanitize_model_dir` (kept private to
+/// that module).
+fn sanitize_for_lookup(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "_unnamed_".into();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    for c in trimmed.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    out
 }

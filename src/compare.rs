@@ -647,7 +647,7 @@ pub fn render_html(inputs: &CompareInputs) -> String {
 
     format!(
         r##"<!doctype html>
-<html lang="en">
+<html lang="zh">
 <head>
   <meta charset="utf-8">
   <title>{title}</title>

@@ -139,6 +139,30 @@ impl OpenaiClient {
                     {
                         m.cache_hit_input_tokens = cached as u32;
                     }
+                    // M8: speculative decoding stats. The standard
+                    // OpenAI streaming usage object has
+                    // completion_tokens_details.accepted_prediction_tokens
+                    // when the server uses speculative decoding
+                    // (vLLM and some local servers). Anthropic has
+                    // no equivalent today. We read it if present and
+                    // otherwise leave the field at 0.
+                    if let Some(details) = u.get("completion_tokens_details") {
+                        if let Some(accepted) = details
+                            .get("accepted_prediction_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            m.spec_accepted_tok = accepted as u32;
+                        }
+                        if let Some(reasoning) = details
+                            .get("reasoning_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            // Add reasoning tokens to decoded (the model
+                            // produced them, even if not surfaced as
+                            // completion_tokens).
+                            m.spec_decoded_tok += reasoning as u32;
+                        }
+                    }
                 }
                 if let Some(choices) = parsed.get("choices").and_then(|v| v.as_array()) {
                     for choice in choices {

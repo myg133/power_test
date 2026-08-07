@@ -1110,3 +1110,102 @@ async fn e2e_dynamic_multi_cache_hit_rate_aggregates_per_turn() {
     drop(g);
     let _ = client; // silence unused
 }
+
+    /// M7: a single `save_run` produces the run directory AND
+    /// regenerates the model dashboard at `<model>/index.html`.
+    /// This is the auto-regenerate hook the executor relies
+    /// on so a fresh `power_test run` shows up in the
+    /// dashboard without a separate `power_test dashboard`
+    /// invocation.
+    #[test]
+    fn save_run_auto_regenerates_dashboard() {
+        use power_test::config::RunStatus;
+        use power_test::storage;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let run_id = "auto-dash-run";
+        let mut cfg = build_config("http://localhost:1/v1/chat/completions".into(), 1);
+        cfg.run_id = run_id.into();
+        cfg.model = "gpt-3.5-turbo".into();
+
+        let agg = MetricsAggregator::new();
+        let summary = report::render_summary(&cfg, &agg, false);
+        let html = report::render_html(&cfg, &agg, false);
+
+        storage::save_run(&root, run_id, &cfg, &agg, &summary, &html, RunStatus::Completed)
+            .expect("save_run ok");
+
+        // The run directory was created.
+        assert!(root.join("gpt-3.5-turbo").join(run_id).is_dir());
+
+        // The dashboard was regenerated automatically.
+        let dash = root.join("gpt-3.5-turbo").join("index.html");
+        assert!(dash.is_file(), "save_run should auto-regenerate the dashboard");
+        let body = std::fs::read_to_string(&dash).expect("read dashboard");
+        assert!(body.contains("gpt-3.5-turbo"), "dashboard should show the model name");
+        assert!(body.contains("auto-dash-run"), "dashboard should list the run id");
+        // The default language is now Chinese, the JS toggle is present.
+        assert!(body.contains(r#"<html lang="zh">"#));
+        assert!(body.contains("lang-toggle"));
+    }
+
+    /// M7: a two-run save + manual regen shows both runs in
+    /// the embedded data block of the dashboard, with the
+    /// JS-side diff math in place. Catches regressions in
+    /// the rendering pipeline (e.g. forgetting to escape
+    /// `</script>` in the embedded JSON).
+    #[test]
+    fn e2e_dashboard_for_one_model_2_runs() {
+        use power_test::config::RunStatus;
+        use power_test::storage;
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        for (rid, tag) in [("m7-run-a", Some("baseline")), ("m7-run-b", Some("ramp"))] {
+            let mut cfg = build_config("http://localhost:1/v1/chat/completions".into(), 1);
+            cfg.run_id = rid.into();
+            cfg.model = "m7-model".into();
+            cfg.tag = tag.map(String::from);
+            let agg = MetricsAggregator::new();
+            let summary = report::render_summary(&cfg, &agg, false);
+            let html = report::render_html(&cfg, &agg, false);
+            storage::save_run(
+                &root,
+                rid,
+                &cfg,
+                &agg,
+                &summary,
+                &html,
+                RunStatus::Completed,
+            )
+            .expect("save_run ok");
+        }
+        // Re-render explicitly to mimic the post-save auto-hook.
+        storage::regenerate_dashboard_for_group(&root, "m7-model")
+            .expect("regenerate_dashboard_for_group ok");
+        let dash = root.join("m7-model").join("index.html");
+        let body = std::fs::read_to_string(&dash).expect("dashboard must exist");
+        // Both run ids appear in the embedded JSON.
+        let marker = r##"<script id="dash-data" type="application/json">"##;
+        let start = body.find(marker).expect("dash-data script tag") + marker.len();
+        let end = body[start..].find("</script>").map(|i| start + i).expect("dash-data closes");
+        let payload = &body[start..end];
+        let parsed: serde_json::Value =
+            serde_json::from_str(payload).expect("dash-data JSON must parse");
+        let arr = parsed.as_array().expect("dash-data must be array");
+        assert_eq!(arr.len(), 2, "two runs must land in the dashboard");
+        let ids: Vec<&str> = arr
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["run_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"m7-run-a"));
+        assert!(ids.contains(&"m7-run-b"));
+        // The JS-side diff is in place.
+        assert!(body.contains("function delta"));
+        assert!(body.contains("function colorClass"));
+        // Default lang is Chinese, English dict is embedded.
+        assert!(body.contains(r#"<html lang="zh">"#));
+        assert!(body.contains(r#"id="i18n-dict-en""#));
+    }
