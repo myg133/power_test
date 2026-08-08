@@ -141,8 +141,11 @@ editing is faster than `--help`.
    ```
 
 6. **Generate the report.** The run already wrote
-   `~/.power_test/history/<run-id>/report.html` and `summary.txt`.
-   Re-render (after editing the source) with:
+   `~/.power_test/history/<group_key>/<run-id>/report.html` and
+   `summary.txt`. `<group_key>` is the model name (or
+   `--model-alias` if you set one), so the per-model history is
+   one folder per logical model. Re-render (after editing the
+   source) with:
 
    ```bash
    & D:\MyCodes\Rust\power_test\target\release\power_test.exe report <run-id>
@@ -156,6 +159,22 @@ editing is faster than `--help`.
 
    Output lands at
    `~/.power_test/history/compare-<a>-vs-<b>-<ts>.html`.
+
+   For the per-model **dashboard** (M7) — lists every run for a
+   model with a side-by-side compare picker:
+
+   ```bash
+   # Auto-regenerated on every `run` save. Manually:
+   & D:\MyCodes\Rust\power_test\target\release\power_test.exe dashboard
+   & D:\MyCodes\Rust\power_test\target\release\power_test.exe dashboard qwen36
+   & D:\MyCodes\Rust\power_test\target\release\power_test.exe dashboard qwen36 --no-write
+   ```
+
+   Dashboard output lands at
+   `~/.power_test/history/<group_key>/index.html`. The run_id
+   cell is an `<a class="run-link">` (middle-click / right-click
+   work natively), and the whole row is also clickable — both
+   open the run's `report.html` in a new tab.
 
 7. **Interpret the result.** Read `summary.txt` first — it is plain
    text. The four panels (latency / TTFT / ITL / TPS) are the
@@ -183,12 +202,20 @@ editing is faster than `--help`.
 
 ## Output contract
 
-- Per run: `~/.power_test/history/<run-id>/{config.json,
-  metrics.json, report.html, summary.txt}`.
+- Per run: `~/.power_test/history/<group_key>/<run-id>/{config.json,
+  metrics.json, report.html, summary.txt}`. `<group_key>` is the
+  `--model-alias` (if set) or the model name.
 - Per compare: `~/.power_test/history/compare-<a>-vs-<b>-<ts>.html`
   (only when `--html` is passed).
-- A run-id is a UUIDv4. The last 4 hex chars are enough to refer
-  to it in chat.
+- Per model dashboard (M7):
+  `~/.power_test/history/<group_key>/index.html` (auto-regenerated
+  on every `run` save, also re-renderable via
+  `power_test dashboard [<NAME>]`).
+- A run-id is `YYYYMMDD-HH-mm-ss-XXXXXX` in the host's **local
+  timezone** (not UTC) with a 6-hex-char random suffix. The
+  timestamp is what `ls` shows; the suffix defends against
+  same-second collisions. The last 6 hex chars (the suffix) are
+  enough to refer to it in chat.
 - The binary **does not** print a success/failure exit code based
   on per-request errors — failed requests are recorded into
   `metrics.json` and the run still completes. This is intentional:
@@ -355,3 +382,50 @@ end up in separate folders and never see each other in
 - `references/report-interpretation.md` — what TTFT / ITL / TPS
   / latency percentiles mean, what's "good", and the common
   failure shapes you should report up.
+
+## M7: bilingual reports + model dashboard
+
+Every HTML report (`report.html` and the per-model `index.html`)
+is rendered in **Chinese by default** with a top-right
+**中文 / English** toggle. The choice is persisted in
+`localStorage` under `power_test.lang`, so opening another
+report on the same browser keeps the language. Translating is
+data-driven — the HTML body carries a `data-i18n="<key>"`
+attribute on every label, and a small inline script swaps
+`textContent` against the embedded English dictionary. Adding
+a new label = adding an entry to both the zh and en dicts in
+`src/report/i18n.rs`; the `dictionaries_have_same_keys` test
+fails the build if one side is missing.
+
+`summary.txt` and the CLI output stay in English — they're for
+operators skimming a terminal, where Chinese is the wrong
+default. The text content of `summary.txt` is stable across M6
+and M7.
+
+`summary.txt` and the report always render the **prompt cache**
+section, even when the run saw no cache data. The card reads
+`0.0% (no cache observed)` in the no-data case and `100.0%` in
+the data case, with a per-turn bar pair (Overall / Turn 1) and
+a Turn 2+ row hidden when no continuation turns were observed
+(single-turn or first-turn-only runs). This is the M7 change
+from M6e, which used to hide the section entirely.
+
+The **advanced metrics** card (M8 fields — TPOT, Output
+throughput, Total throughput, Avg Input/Output tokens, Avg
+turns/request, speculative decode/accept when present) sits
+between the summary table and the cache card. Heading: `高级指标`
+(zh) / `Advanced metrics` (en). Labels are translated to
+Chinese; the English dictionary carries matching wording for
+the toggle.
+
+The **model dashboard** (`power_test dashboard [<NAME>]`) lists
+every run for a model and lets the reader pick two runs to
+compare side-by-side. The diff math runs in the browser (port
+of the Rust `compare::Delta` / `color_class` rules) so the page
+works offline. The run_id cell is an `<a class="run-link">`
+pointing at the run's `report.html` (middle-click / right-click
+work natively), and the whole row is also clickable — both
+open the report in a new tab. Dashboards are auto-regenerated
+on every `run` save (best-effort, failure logs a `tracing::warn!`
+and the save still succeeds), so you rarely need the manual
+`power_test dashboard` invocation outside of CI or back-fills.

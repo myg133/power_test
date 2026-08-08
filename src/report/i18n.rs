@@ -135,15 +135,20 @@ const fn zh_dict() -> &'static [(&'static str, &'static str)] {
         ("metric.ttft", "首 token (毫秒)"),
         ("metric.itl", "token 间隔 (毫秒)"),
         ("metric.tps", "TPS (token/秒)"),
-        ("metric.t8", "M8 指标"),
-        ("metric.tpot", "TPOT (ms/token)"),
-        ("metric.throughput_output", "Output tok/s"),
-        ("metric.throughput_total", "Total tok/s"),
-        ("metric.avg_input", "Avg Input Tokens"),
-        ("metric.avg_output", "Avg Output Tokens"),
-        ("metric.avg_turns", "Avg Turns/Request"),
-        ("metric.spec_decoded", "Decoded Tok/Iter"),
-        ("metric.spec_accept", "Spec. Accept Rate"),
+        // M7: the M8 advanced-metrics card was renamed and
+        // translated. M8 was a working name; the labels now
+        // read in Chinese by default and the English
+        // dictionary carries the matching "Advanced metrics"
+        // / "TPOT (ms/token)" wording.
+        ("metric.t8", "高级指标"),
+        ("metric.tpot", "TPOT (毫秒/token)"),
+        ("metric.throughput_output", "输出 token/秒"),
+        ("metric.throughput_total", "总 token/秒"),
+        ("metric.avg_input", "平均输入 token"),
+        ("metric.avg_output", "平均输出 token"),
+        ("metric.avg_turns", "平均轮次/请求"),
+        ("metric.spec_decoded", "每轮解码 token"),
+        ("metric.spec_accept", "投机接受率"),
         ("metric.p50", "p50"),
         ("metric.p90", "p90"),
         ("metric.p99", "p99"),
@@ -306,7 +311,7 @@ const fn en_dict() -> &'static [(&'static str, &'static str)] {
         ("metric.ttft", "TTFT (ms)"),
         ("metric.itl", "ITL (ms)"),
         ("metric.tps", "TPS (tok/s)"),
-        ("metric.t8", "M8 metrics"),
+        ("metric.t8", "Advanced metrics"),
         ("metric.tpot", "TPOT (ms/token)"),
         ("metric.throughput_output", "Output tok/s"),
         ("metric.throughput_total", "Total tok/s"),

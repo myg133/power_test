@@ -122,10 +122,13 @@ prompt cache
   the prefix); on later turns it should be 0.
 
 The HTML report renders the same numbers as a "Prompt cache"
-card with the global rate as a large headline and three bar
-rows (overall / turn 1 / turn 2+). The section is hidden when
-no cache data was observed (single-turn runs, endpoints that
-don't report cache fields).
+card with the global rate as a large headline and a per-turn
+bar pair (overall / turn 1, plus a `Turn 2+` row when
+continuation turns were observed). M7 made the section
+**always render** — single-turn or no-cache-data runs read
+`0.0% (no cache observed)` instead of hiding the card. This
+keeps the report layout stable when comparing single-turn vs
+multi-turn runs of the same model.
 
 ## M6: session stats (multi-turn runs only)
 
@@ -158,6 +161,61 @@ is just for filesystem hygiene and the compare-with dropdown.
 history subdirectories)"). That's the signal that the diff
 is comparing across different logical models, even when the
 literal model string happens to match.
+
+## M7: advanced metrics card (TPOT / throughput / turns)
+
+The HTML report carries a second table directly under the
+Summary statistics table. Heading: `高级指标` (zh) / `Advanced
+metrics` (en). Each row is a single-value metric (no
+percentile distribution):
+
+- **TPOT (毫秒/token)**: time per output token during the
+  streaming portion. Complements ITL — ITL is the gap between
+  consecutive tokens, TPOT is total streaming time divided by
+  output tokens. Lower is better. On a 7B model on a single
+  H100 expect 10-30 ms; on a 70B expect 30-100 ms.
+- **输出 token/秒 (Output tok/s)**: sum of completion tokens
+  divided by total streaming time. The aggregate throughput
+  view; not the same as the per-request TPS in the Summary
+  table (which is a per-request mean).
+- **总 token/秒 (Total tok/s)**: same denominator but counts
+  prompt + completion tokens. Useful when comparing against
+  the server's rated context throughput.
+- **平均输入 token / 平均输出 token**: per-request means.
+- **平均轮次/请求**: `session_turn_total / total_requests`.
+  Reads as 1.0 for a single-turn run; 2.0+ for multi-turn.
+- **每轮解码 token / 投机接受率**: speculative-decoding
+  fields. Only present when the run reported
+  `usage.completion_tokens_details.accepted_prediction_tokens`
+  (OpenAI) or an equivalent; the rows are hidden when no
+  speculative data was observed.
+
+## M7: language toggle
+
+Every HTML report (`report.html` and the per-model
+`index.html`) is rendered in Chinese by default. The
+top-right corner has a `中文 / English` button; clicking flips
+every `[data-i18n]` element to the English dictionary. The
+choice is persisted in `localStorage` under `power_test.lang`.
+The summary text and CLI output stay in English.
+
+## M7: per-model dashboard
+
+`power_test dashboard [<NAME>]` renders a per-model page that
+lists every run for a model (newest first), with a side-by-side
+compare picker at the bottom. The run_id cell is a real
+`<a class="run-link">` pointing at the run's `report.html` —
+middle-click / right-click open in a new tab natively, and
+clicking anywhere else in the row also opens the report via a
+JS row click handler. Diff math (delta / color_class) runs in
+the browser; the page works offline because chart.js is
+inlined.
+
+The dashboard is auto-regenerated on every `run` save
+(best-effort, failure logs a warning and the real save still
+succeeds). The manual `power_test dashboard <NAME>` is mostly
+for back-fills, CI, and explicit refreshes after re-rendering
+a report.
 
 ## Other sections of `summary.txt`
 
