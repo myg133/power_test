@@ -1,11 +1,16 @@
-# Reading the report
+# Reading the report (single run)
 
 `power_test` writes a `summary.txt` (plain text) and a
-`report.html` (self-contained, with Chart.js) for every run, plus
-`compare-<a>-vs-<b>-<ts>.html` when `compare --html` is invoked.
+`report.html` (self-contained, with Chart.js) for every run.
+The M7 per-model dashboard at
+`~/.power_test/history/<model>/index.html` aggregates
+every run for a model in one page.
 
-This file tells you what each metric means, what's a normal value,
-and what shape of failure you should call out to the user.
+This file is the **single-run** interpretation guide. For
+the **two-run diff** (the compare page), see
+`power-test-compare/references/compare-interpretation.md`.
+For the TPM / RPM SLA workflow on a new upstream, see
+`power-test-onboard/references/onboarding.md`.
 
 ## The headline numbers
 
@@ -24,7 +29,7 @@ populated; the other three read "(no data)".
 ### latency p50 / p90 / p99 / p99.9
 
 - **p50 (median)**: the typical user experience.
-- **p90**: the unhappy-user threshold. Anything north of ~1 s
+- **p90**: the unhappy-user threshold. Anything north of ~ 1 s
   here is usually a complaint.
 - **p99**: the SLA number most teams quote. Compare this
   week-over-week.
@@ -112,7 +117,7 @@ prompt cache
   read or build the cache.
 - **`turn 2+`**: hit rate on continuation turns. For a
   well-tuned inference backend with prompt cache enabled,
-  this should be **~100%**. A drop here is the earliest
+  this should be **~ 100%**. A drop here is the earliest
   signal that KV cache is being evicted or the prefix is
   being rebuilt unnecessarily.
 - **`cache creation`**: tokens the model wrote to cache.
@@ -138,9 +143,10 @@ has `follow_ups`) also report session bookkeeping. The
 
 - **`session_count`**: number of distinct sessions that
   completed at least one turn.
-- **`session_turn_total`**: sum of per-session turn counts.
-  Should equal `session_count × (1 + average follow_up count)`
-  for a clean run.
+- **`session_turn_total`**: total number of turn-completions
+  across the run — every `record_completed` call counts as 1
+  turn. For a single-turn run this equals `total_requests`; for
+  multi-turn it grows with continuation turns.
 - **`session_dropped`**: number of sessions that bailed out
   mid-conversation because a turn returned non-2xx. Should be
   0 for a healthy run; nonzero indicates an endpoint
@@ -165,8 +171,8 @@ literal model string happens to match.
 ## M7: advanced metrics card (TPOT / throughput / turns)
 
 The HTML report carries a second table directly under the
-Summary statistics table. Heading: `高级指标` (zh) / `Advanced
-metrics` (en). Each row is a single-value metric (no
+Summary statistics table. Heading: `高级指标` (zh) /
+`Advanced metrics` (en). Each row is a single-value metric (no
 percentile distribution):
 
 - **TPOT (毫秒/token)**: time per output token during the
@@ -216,6 +222,59 @@ The dashboard is auto-regenerated on every `run` save
 succeeds). The manual `power_test dashboard <NAME>` is mostly
 for back-fills, CI, and explicit refreshes after re-rendering
 a report.
+
+## TPM / RPM (for SLA conversations)
+
+`summary.txt` already prints the per-second throughput
+numbers. For the SLA the operator usually wants the
+per-minute rate. The conversion:
+
+```
+RPM                      = achieved_rps              × 60
+TPM (output tokens / min) = output_throughput_tps     × 60
+TPM (total tokens / min)  = total_throughput_tps      × 60
+```
+
+For a one-line SLA report (paste-into-ticket), pull the
+numbers straight from `metrics.json`:
+
+```powershell
+$j = Get-Content "$env:USERPROFILE\.power_test\history\<model>\<run>\metrics.json" | ConvertFrom-Json
+"  RPM:                $($j.achieved_rps * 60)"
+"  TPM (output):       $($j.output_throughput_tps * 60)"
+"  TPM (total):        $($j.total_throughput_tps * 60)"
+"  p50 latency (ms):   $($j.avg_latency_ms)"
+```
+
+Vendor SLA tables usually quote **TPM (output)** for
+generation cost, or **RPM** for concurrency, or both.
+Match the formula to the contract: "RPM" is universal,
+"TPM" depends on whether the vendor counts input +
+output or just output. The summary's "output" vs "total"
+distinction lets you quote either number without re-running
+the test.
+
+When you're quoting TPM / RPM numbers in a vendor ticket
+or a customer SLA, also include **achieved RPS** as a
+percentage of the target, and the run's `concurrency` —
+those tell the other side how hard you pushed. The
+"pass / fail criteria" table in
+`power-test-onboard/references/onboarding.md` has the
+thresholds we use.
+
+For the per-request TPM check (the customer's
+"am I getting the TPM per request I paid for?"):
+
+```
+TPM (output per request) = TPM (output) / RPM
+                          = avg_output_tokens
+```
+
+i.e. the per-request TPM is just the average output-token
+count. If the SLA is "10 000 TPM per request", that's
+"the average response should have 10 000 output tokens"
+in disguise — the contract is really an "average output
+length" promise.
 
 ## Other sections of `summary.txt`
 
@@ -275,24 +334,10 @@ browser. It includes:
   target. Picking one in a browser navigates to the pre-rendered
   `compare-*.html` for the pair.
 
-## Compare HTML (`compare-<a>-vs-<b>-<ts>.html`)
+## Cross-references
 
-Use this for regression reports. It prints every metric three
-times: A's value, B's value, the delta. Deltas are color-coded:
-
-- Green: improvement (lower latency, higher TPS, higher RPS,
-  lower error rate).
-- Red: regression.
-- Grey: unchanged (within a small epsilon).
-
-Watch for:
-
-- **Latency p99 went up but p50 didn't**: tail regression. Often
-  a single bad shard or a new slow code path.
-- **Achieved RPS dropped but target was the same**: back-pressure
-  kicked in. Either the new build is slower, or the server
-  capacity changed.
-- **TTFT unchanged but ITL regressed**: prefill is fine,
-  decode got slower. Often a kernel change.
-- **Success rate dropped**: real bug, not just a performance
-  drift. Investigate before merging.
+- `power-test-compare` — for two-run side-by-side diff
+  (`references/compare-interpretation.md` is the diff guide).
+- `power-test-onboard` — for the 3-report SLA workflow on a
+  new upstream (`references/onboarding.md` has the hand-off
+  checklist).

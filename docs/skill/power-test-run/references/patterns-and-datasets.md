@@ -121,7 +121,7 @@ If you don't have a reason to prefer one, the default is fine.
 ## TUI
 
 `--tui` is orthogonal to pattern + dataset. Use it whenever a run
-is expected to last longer than ~30 s and the operator is at a
+is expected to last longer than ~ 30 s and the operator is at a
 terminal. Key bindings:
 
 - `q` or `Esc`: cancel the run cleanly (drain in-flight, then
