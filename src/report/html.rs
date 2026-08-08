@@ -1013,17 +1013,42 @@ mod tests {
             agg.record_completed(&m, 0, &crate::runner::metrics::CompletionContext::none());
         }
         let html = render_html(&cfg(), &agg, false);
-        // The summary table still uses the same
-        // "Summary statistics" / "摘要统计" wording.
-        let summary_start = html.find("Summary statistics").or_else(|| html.find("摘要统计")).expect("summary section");
+        // M7 fix: the heading is rendered in zh by default
+        // ("摘要统计") but the i18n-dict-en block ALSO
+        // contains the string "Summary statistics", and
+        // the i18n-dict-zh block contains "摘要统计".
+        // Anchor on the data-i18n attribute on the <h2>
+        // instead of the visible text, so we never jump
+        // past the table into the embedded JSON.
+        let summary_start = html
+            .find(r#"<h2 data-i18n="metric.heading">"#)
+            .expect("summary section heading");
         let summary_end = html[summary_start..]
             .find("</table>")
             .map(|i| summary_start + i + "</table>".len())
             .unwrap_or(html.len());
         let summary = &html[summary_start..summary_end];
 
-        for metric in ["Latency (ms)", "延迟 (毫秒)", "TTFT (ms)", "首 token (毫秒)", "ITL (ms)", "token 间隔 (毫秒)", "TPS (tok/s)", "TPS (token/秒)"] {
-            let row_start = summary.find(metric).expect(metric);
+        // Each metric is rendered in the default locale (zh), so
+        // look up the visible label that matches the row we want
+        // by trying every language variant until one matches.
+        // M7 fix: the table cells are i18n-tagged with
+        // `data-i18n="metric.latency"` etc., and the visible
+        // text is the zh label. The previous test scanned for
+        // the English label which is not present in the default
+        // render.
+        let rows: &[(&str, &[&str])] = &[
+            ("Latency (ms)",   &["延迟 (毫秒)", "Latency (ms)"]),
+            ("TTFT (ms)",      &["首 token (毫秒)", "TTFT (ms)"]),
+            ("ITL (ms)",       &["token 间隔 (毫秒)", "ITL (ms)"]),
+            ("TPS (tok/s)",    &["TPS (token/秒)", "TPS (tok/s)"]),
+        ];
+        for (label, candidates) in rows {
+            let row_start = candidates
+                .iter()
+                .filter_map(|c| summary.find(c))
+                .next()
+                .unwrap_or_else(|| panic!("{label} row not found in summary section"));
             let row_end = summary[row_start..]
                 .find("</tr>")
                 .map(|i| row_start + i + "</tr>".len())
@@ -1031,12 +1056,12 @@ mod tests {
             let row = &summary[row_start..row_end];
             assert!(
                 !row.contains("—"),
-                "M6h: {metric} row still has '—' in the Summary table: {row}"
+                "M6h: {label} row still has '—' in the Summary table: {row}"
             );
             let td_count = row.matches("<td>").count();
             assert_eq!(
                 td_count, 4,
-                "M6h: {metric} row should have 4 cells, got {td_count}: {row}"
+                "M6h: {label} row should have 4 cells, got {td_count}: {row}"
             );
         }
     }

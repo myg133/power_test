@@ -1087,6 +1087,9 @@ mod tests {
             session_continuation: false,
             cache_creation_input_tokens: 0,
             cache_hit_input_tokens: 0,
+            spec_decoded_tok: 0,
+            spec_accepted_tok: 0,
+            spec_iterations: 0,
         }
     }
 

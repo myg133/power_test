@@ -945,13 +945,78 @@ pub fn list_group_keys(root: &Path) -> Result<Vec<String>> {
 /// it to `<root>/<group_key>/index.html`. Idempotent: running
 /// it twice produces the same result.
 ///
-/// This is best-effort: a failure logs a `tracing::warn!` and
-/// returns `Ok(())` so a dashboard-render error never blocks
-/// the real save.
-/// M7 stub: model_dashboard module was removed to keep main project compiling.
-/// Auto-regen of the dashboard is currently disabled. Use `power_test dashboard`
-/// to manually regenerate when the model_dashboard module is restored.
-pub fn regenerate_dashboard_for_group(_root: &Path, _group_key: &str) -> Result<()> {
+/// Failures are logged via `tracing::warn!` and returned as
+/// `Err(...)` so callers can decide whether to swallow them
+/// (the auto-regen hook in `save_run` does, the
+/// `power_test dashboard` CLI surfaces them).
+pub fn regenerate_dashboard_for_group(root: &Path, group_key: &str) -> Result<()> {
+    use crate::report::model_dashboard::{render_dashboard, run_summary_from_run, RunSummary};
+    use crate::runner::MetricsAggregator;
+
+    // Pull every run that belongs to this group. The
+    // `list_runs_by_alias` filter handles both real aliases and
+    // legacy runs whose `model_alias` is null (those fall back
+    // to the model name as the group key).
+    let entries = list_runs_by_alias(root, group_key, None)?;
+    if entries.is_empty() {
+        tracing::warn!(group_key, "no runs found; skipping dashboard render");
+        return Ok(());
+    }
+
+    let mut runs: Vec<RunSummary> = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        // `load_compare_data` gives us the parsed `RunConfig`,
+        // the per-request records, and the status from the
+        // index — everything we need to build a `RunSummary`.
+        match load_compare_data(root, &entry.run_id) {
+            Ok((config, records, _status)) => {
+                let agg = MetricsAggregator::from_records(&records);
+                runs.push(run_summary_from_run(
+                    &config,
+                    &agg,
+                    format!("{}/report.html", entry.run_id),
+                ));
+            }
+            Err(e) => {
+                // Don't fail the whole regeneration for one
+                // corrupt run; log and move on. A single bad
+                // record should not delete the dashboard.
+                tracing::warn!(
+                    run_id = %entry.run_id,
+                    error = %e,
+                    "skipping unreadable run during dashboard regen",
+                );
+            }
+        }
+    }
+
+    if runs.is_empty() {
+        tracing::warn!(group_key, "all runs unreadable; skipping dashboard write");
+        return Ok(());
+    }
+
+    // Newest first — `list_runs_by_alias` already sorts by
+    // timestamp desc, but be explicit so a future sort change
+    // doesn't silently flip the dashboard order.
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+    // Use the first run's effective group key as the alias
+    // hint in the subtitle. If multiple runs in the group
+    // disagree on the alias (which shouldn't happen since the
+    // group_key is alias-or-model), prefer the first one's
+    // alias if any.
+    let model = entries
+        .first()
+        .and_then(|e| e.model.clone())
+        .unwrap_or_else(|| group_key.to_string());
+    let alias = entries.first().and_then(|e| e.model_alias.clone());
+
+    let html = render_dashboard(group_key, &model, alias.as_deref(), &runs);
+
+    let dir = root.join(sanitize_model_dir(group_key));
+    fs::create_dir_all(&dir).map_err(|e| Error::io_at(&dir, e))?;
+    let path = dir.join("index.html");
+    fs::write(&path, html).map_err(|e| Error::io_at(&path, e))?;
     Ok(())
 }
 

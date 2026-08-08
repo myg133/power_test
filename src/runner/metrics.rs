@@ -160,7 +160,13 @@ pub struct MetricsAggregator {
     /// M6 session bookkeeping. `session_count` is the number of
     /// distinct sessions that completed at least one turn.
     session_count: u64,
-    /// `session_turn_total` is the sum of per-session turn counts.
+    /// `session_turn_total` is the total number of turn-completions
+    /// across the run. Each `record_completed` call counts as 1
+    /// turn, so a 2-turn multi-turn session contributes 2 and a
+    /// single-turn request contributes 1. The M8 metric
+    /// `avg_turns_per_request` divides this by `total_requests`,
+    /// which is why a single-turn run reads as 1.0 and a 2-turn
+    /// run reads as 2.0.
     session_turn_total: u64,
     /// `session_dropped` is the number of sessions that bailed out
     /// early because a turn returned non-2xx or empty assistant text.
@@ -271,10 +277,11 @@ impl MetricsAggregator {
             self.success_count += 1;
         }
         *self.status_codes.entry(rec.status).or_insert(0) += 1;
-        // M6 session bookkeeping.
-        if rec.session_id.is_some() {
-            self.session_turn_total += 1;
-        }
+        // M6 session bookkeeping: every record counts as 1
+        // turn. Single-turn requests contribute 1 turn, each
+        // turn of a multi-turn session contributes 1, and
+        // `avg_turns_per_request` divides by `total_requests`.
+        self.session_turn_total += 1;
         // M6e: cache aggregation. Single-turn records land in the
         // turn-1 bucket by default (no per-turn distinction in
         // single-turn mode; the renderer treats the overall rate
@@ -340,9 +347,10 @@ impl MetricsAggregator {
         }
         *self.status_codes.entry(metrics.status).or_insert(0) += 1;
         *self.per_second_completed.entry(second_offset).or_insert(0) += 1;
-        if rec.session_id.is_some() {
-            self.session_turn_total += 1;
-        }
+        // M6 session bookkeeping: every record counts as 1
+        // turn (see the same comment on the `push_record_clone`
+        // branch above).
+        self.session_turn_total += 1;
         // M6e: cache aggregation. `turn_for_cache` is the turn
         // number (1 for seed, 2+ for continuations) or 1 for any
         // single-turn request.
@@ -463,8 +471,11 @@ impl MetricsAggregator {
     /// M6 session stats. Returns `(session_count, session_turn_total,
     /// session_dropped)`. `session_count` is the number of distinct
     /// sessions that completed at least one turn. `session_turn_total`
-    /// is the sum of per-session turn counts (excluding dropped
-    /// sessions). `session_dropped` is the number of sessions that
+    /// is the total number of turn-completions across the run —
+    /// every `record_completed` call counts as 1 turn (single-turn
+    /// or multi-turn), so the value equals `total_requests` for a
+    /// single-turn run and grows with multi-turn continuation
+    /// turns. `session_dropped` is the number of sessions that
     /// bailed out early because a turn failed.
     pub fn session_stats(&self) -> (u64, u64, u64) {
         (self.session_count, self.session_turn_total, self.session_dropped)
@@ -782,6 +793,9 @@ mod tests {
             response_text: String::new(),
             cache_creation_input_tokens: 0,
             cache_hit_input_tokens: 0,
+            spec_decoded_tok: 0,
+            spec_accepted_tok: 0,
+            spec_iterations: 0,
             started_at: chrono::Utc::now(),
             finished_at: chrono::Utc::now(),
         }
@@ -840,6 +854,9 @@ mod tests {
             session_continuation: false,
             cache_creation_input_tokens: 0,
             cache_hit_input_tokens: 0,
+            spec_decoded_tok: 0,
+            spec_accepted_tok: 0,
+            spec_iterations: 0,
         };
         assert!((rec.tps() - 20.0).abs() < 0.01);
     }

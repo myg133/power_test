@@ -1195,8 +1195,6 @@ async fn e2e_dynamic_multi_cache_hit_rate_aggregates_per_turn() {
         let arr = parsed.as_array().expect("dash-data must be array");
         assert_eq!(arr.len(), 2, "two runs must land in the dashboard");
         let ids: Vec<&str> = arr
-            .as_array()
-            .unwrap()
             .iter()
             .map(|r| r["run_id"].as_str().unwrap())
             .collect();
