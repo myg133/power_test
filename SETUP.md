@@ -162,7 +162,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # 或 ~/.zshrc
 | 3 | Claude Code | `<home>/.claude/skills/` |
 | 4 | Cursor | `<home>/.cursor/skills/` |
 | 5 | Codex / OpenAI | `<home>/.codex/skills/` |
-| 6 | 通用 fallback | `<home>/.local/share/agent-skills/` |
+| 6 | 通用 fallback | `<home>/.agents/skills/` |
 
 **实操（bash / zsh）：**
 
@@ -180,7 +180,7 @@ for d in "$HOME/.minimax/skills" "$HOME/.claude/skills" "$HOME/.cursor/skills" "
     break
   fi
 done
-[ -z "$SKILL_ROOT" ] && SKILL_ROOT="$HOME/.local/share/agent-skills"  # 兜底
+[ -z "$SKILL_ROOT" ] && SKILL_ROOT="$HOME/.agents/skills"  # 兜底
 echo "using SKILL_ROOT=$SKILL_ROOT"
 ```
 
@@ -207,7 +207,7 @@ foreach ($d in $candidates) {
     }
 }
 if (-not $env:SKILL_ROOT) {
-    $env:SKILL_ROOT = "$env:USERPROFILE\.local\share\agent-skills"
+    $env:SKILL_ROOT = "$env:USERPROFILE\.agents\skills"
 }
 Write-Host "using SKILL_ROOT=$env:SKILL_ROOT"
 ```
