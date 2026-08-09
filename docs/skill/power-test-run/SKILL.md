@@ -2,318 +2,218 @@
 name: power-test-run
 description: |
   Run HTTP-level stress test against ONE LLM inference endpoint with
-  the `power_test` CLI (built at D:\MyCodes\Rust\power_test) and
-  produce a self-contained HTML report. Use when the user says
-  "压测 LLM"、"压一下 QPS"、"stress test"、"benchmark one
-  endpoint"、"测一下 TTFT/ITL/TPS"、or wants to validate TPM / RPM
-  against SLA on a single endpoint. Supports OpenAI / Anthropic /
-  raw HTTP, with patterns: constant / ramp / spike / soak.
-  Do NOT use for: comparing two runs (use `power-test-compare`),
-  the 3-report SLA workflow for a new upstream (use
-  `power-test-onboard`), Locust/k6/wrk-style non-LLM load tests,
+  the `power_test` CLI and produce a self-contained HTML report. Use
+  when the user says "压测"、"压一下 QPS"、"stress test"、
+  "benchmark one endpoint"、"测一下 TTFT/ITL/TPS"、or wants to
+  validate TPM / RPM against SLA on a single endpoint. Supports
+  OpenAI / Anthropic / raw HTTP, with patterns: constant / ramp /
+  spike / soak. Do NOT use for: comparing two runs (use
+  `power-test-compare`), the 3-report SLA workflow for a new upstream
+  (use `power-test-onboard`), Locust/k6/wrk-style non-LLM load tests,
   GPU-side benchmarks (vLLM bench, sglang bench), or comparing
   framework features without sending real traffic.
 ---
 
-# power-test-run (single-endpoint LLM stress test)
+# power-test-run（单端点压测 · 引导式）
 
-This is the core skill: one endpoint, one `power_test run`,
-one report. Everything else (`power-test-compare`,
-`power-test-onboard`) is built on top of it.
+> 一次只问用户一件事。等用户回答再进下一步。用户说"exit"/"cancel"/"算了"任何时候停。
+> 用户如果一次性给了全部信息（"压一下 X 的 Y，Z RPS 跑 N 秒"），直接跳到 Step 7。
 
-## Inputs to collect
+---
 
-Lock these down before invoking. Ask the user only if the
-answer would materially change the test (otherwise pick the
-obvious default).
+## Step 1 · 目标端点
 
-- **`--target`**: full URL of the chat-completions / messages
-  endpoint (e.g. `https://api.openai.com/v1/chat/completions`).
-- **`--api`**: `openai` (default), `anthropic`, or `raw`
-  (any HTTP).
-- **`--model`**: e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20240620`,
-  `qwen36-27B`.
-- **`--model-alias`** (M6g, optional): override the *history
-  grouping key* for this run. Use when the real model name
-  carries a date suffix (`DeepSeek-V4-Flash-20260115`,
-  `claude-3-haiku-20240229`) but you want every snapshot of
-  the same underlying model to land in the same
-  `<history>/<alias>/` subdirectory and show up in each
-  other's compare-with dropdown. When omitted, the model
-  name is used as the group key.
-- **`--api-key`** (or `OPENAI_API_KEY` env var): bearer /
-  `x-api-key`. Local endpoints (ollama, vllm with no auth)
-  may skip this.
-- **`--rps`** + **`--duration`**: how hard and how long.
-- **`--pattern`**: `constant` (default) / `ramp` / `spike` /
-  `soak`.
-- **`--dataset`**: `literal` / `token-budget` / `built-in` /
-  `sharegpt` / `custom`. Default: `literal` with a built-in
-  prompt. For M6 multi-turn conversations, use
-  `--dataset custom --custom-path <file.toml>` with the
-  TOML profile format (see
-  `references/patterns-and-datasets.md`).
+**问用户**：
 
-If the user already has a TOML config, prefer `--config
-<path>` over repeating every flag (CLI flags still win over
-TOML).
+> 压测哪个端点？把完整 URL 给我。
+> 例子：
+>   - `https://api.openai.com/v1/chat/completions`
+>   - `http://192.168.31.101:8317/v1/chat/completions`
+>   - `https://api.anthropic.com/v1/messages`
 
-## Templates
+**校验**：必须以 `http://` 或 `https://` 开头，否则让用户重输。
 
-The repo ships copy-paste-ready templates in
-`D:\MyCodes\Rust\power_test\docs\examples\`:
+**默认**：无（必填）。
 
-- `power_test.toml` — full config template (every field, every
-  pattern kind, every dataset kind, commented).
-- `datasets/multi-turn-conversation.toml` — M6 dynamic_multi
-  (3 example conversations with follow_ups).
-- `datasets/static-multi-conversation.toml` — M6 static_multi
-  (3 example multi-message requests, no follow_ups).
-- `datasets/single-turn-prompts.json` / `.jsonl` — custom
-  dataset format.
-- `datasets/sharegpt-mini.json` — ShareGPT format.
+---
 
-When the user wants a recurring test (e.g. nightly
-benchmark, regression suite), point them at the templates
-first — copying `power_test.toml` to `./power_test.toml` and
-editing is faster than `--help`.
+## Step 2 · API 协议
 
-## Procedure
+**问用户**：
 
-1. **Verify the binary is built.** Run `cargo build` from
-   `D:\MyCodes\Rust\power_test` (M4 spec: do not add deps
-   beyond `toml = "0.8"`, `ratatui = "0.26"`,
-   `crossterm = "0.27"`). If the build fails, surface the
-   error verbatim — do not invent a workaround. Reason: a
-   broken binary would silently produce garbage metrics.
-   `run-tests.ps1` at the project root runs the full
-   `cargo build` + `cargo test` and writes the logs to
-   `results/` for archival.
+> 这个端点用哪种协议？
+>   1. **openai**（OpenAI 兼容，默认）— vLLM、ollama、TGI、llama.cpp、Anthropic 转发网关都算
+>   2. **anthropic**（Anthropic Messages 原生）
+>   3. **raw**（其他 HTTP，自己拼 body）
 
-2. **Pick `--api` to match the endpoint.** OpenAI-compatible
-   servers (vLLM, llama.cpp, ollama, TGI, any
-   `/v1/chat/completions`) → `--api openai`. Anthropic
-   Messages API → `--api anthropic`. Anything else →
-   `--api raw` with `--raw-body-file` and
-   `--raw-content-type`. Wrong `--api` makes the client
-   send the wrong headers and the server returns 4xx;
-   you'll see it in `status codes` and `errors` in the
-   summary.
+**默认**：openai。
 
-3. **Pick `--pattern` to match the question.** Constant is
-   the default — use it for "what's the steady-state
-   RPS?". Ramp answers "how does latency degrade with
-   pressure?". Spike answers "what happens when traffic
-   bursts?". Soak answers "does the server fall over
-   after an hour?" and writes `metrics.json` checkpoints
-   so an interrupted run is partially analyzable.
+**判断小窍门**：URL 包含 `/chat/completions` 或 `/v1/` 且厂商是 OpenAI 系 → openai；URL 是 `/v1/messages` 且厂商是 Anthropic → anthropic；其他情况问用户。
 
-4. **Pick `--dataset` to match the prompt shape.** Single
-   prompt smoke test → `--prompt "..."` (literal).
-   Variable-length realism → `--dataset built-in` (12 mixed
-   English + Chinese prompts). Real conversation data →
-   `--dataset sharegpt --sharegpt-path <file>`. Your own
-   JSON / JSONL → `--dataset custom --custom-path <file>`.
-   For multi-prompt datasets, `--request-strategy random`
-   (default) or `round-robin` to control cycle order.
-   See `references/patterns-and-datasets.md` for the full
-   matrix.
+---
 
-5. **Run the test.** Always use `--log-level info` (default)
-   so the operator sees transport errors. Add `--tui` for
-   long runs (≥ 60s) when a live progress display is wanted
-   — press `q` to cancel cleanly. Always pin `--duration`
-   explicitly; the 60s default is a trap. Three more knobs
-   worth getting right:
+## Step 3 · 认证
 
-   - **`--tag '<model>-<rps>rps-<duration>s'`** — always
-     pass one. The tag is searchable via `power_test list`
-     and is the easiest way to find the run later for
-     `compare`. For the 3-report SLA workflow
-     (`power-test-onboard`) the convention is the role
-     suffix: `qwen36-27b-rps1-dur60-upstream` /
-     `qwen36-27b-rps1-dur60-our`.
-   - **`--stream`**: keep the default (`true`) when TTFT
-     / ITL / TPS are the point. Flip to `--stream false`
-     when the run is short (≤ 30s) and only end-to-end
-     latency matters — the non-streaming mode has a cleaner
-     end-of-request timestamp and won't have ITL jitter
-     from a small sample.
-   - **`--output-dir`**: leave at the default
-     (`~/.power_test/history/`) for interactive use. Pin
-     it to a known path when running from a script, CI, or
-     eval harness, so the `report.html` location is
-     deterministic.
-   - **Latency benchmark vs end-to-end prompt choice.**
-     If the user is asking for a latency / p99 / TTFT
-     number, pair the run with `--prompt "Reply with the
-     single word: ok" --max-tokens 16`. That collapses
-     TTFT ≈ total latency and keeps model-output variance
-     out of the numbers. The built-in literal prompt
-     ("Explain quantum entanglement…", 256 max_tokens)
-     is fine for a smoke test, but confounds the latency
-     benchmark because a 200-token answer takes far
-     longer than a 1-token one. When in doubt, ask the
-     user — but if they say "just give me a number", pick
-     the short-prompt path.
+**问用户**：
 
-   ```powershell
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe run `
-       --target <URL> `
-       --api <KIND> `
-       --model <NAME> `
-       --rps <N> --duration <S> `
-       --dataset <KIND> `
-       --tag '<model>-<N>rps-<S>s' `
-       --log-level info
-   ```
+> API key 怎么办？三选一：
+>   1. **直接给我**（我用 `--api-key` 传，**不会写进 history**）
+>   2. **我已设了 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 环境变量**（你说"用环境变量"就行）
+>   3. **这个端点不用认证**（本地 ollama 等）
 
-6. **Generate the report.** The run already wrote
-   `~/.power_test/history/<group_key>/<run-id>/report.html`
-   and `summary.txt`. `<group_key>` is the model name (or
-   `--model-alias` if you set one), so the per-model history
-   is one folder per logical model. Re-render (after editing
-   the source) with:
+**默认**：1（直接给）。如果用户选 1，agent 记下来用命令行传，不写进配置文件。
 
-   ```powershell
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe report <run-id>
-   ```
+---
 
-7. **Interpret the result.** Read `summary.txt` first — it
-   is plain text. The four panels (latency / TTFT / ITL /
-   TPS) are the headline numbers. For the chart-heavy view,
-   open `report.html` in a browser. For a model-to-model
-   diff, use `power-test-compare`. For the 3-report SLA
-   workflow, use `power-test-onboard`. See
-   `references/report-interpretation.md` for the
-   "what each metric means and what's bad" cheat sheet,
-   including the TPM / RPM math for SLA conversations.
+## Step 4 · 模型名
 
-8. **Hand back to the user.** Return exactly four things:
+**问用户**：
 
-   1. The run-id's last 6 hex chars (the suffix is enough
-      to refer to it in chat).
-   2. The absolute path to `report.html` (the user opens
-      this).
-   3. The `p50` and `p99` lines copied verbatim from
-      `summary.txt` — do not paraphrase, do not "round to
-      nearest 10 ms", do not pull a single number out of a
-      chart.
-   4. **What kind of test it was** — short-prompt (latency
-      benchmark) or full-prompt (end-to-end throughput).
-      One line, no interpretation. The numbers mean
-      different things and the user should know which
-      they got.
+> 模型名是什么？按上游厂商的写法。
+> 例子：`gpt-4o-mini`、`claude-3-5-sonnet-20240620`、`qwen36-27B`
 
-   If the user asked for a diff, hand off to
-   `power-test-compare` instead.
+**校验**：非空字符串。
 
-## Output contract
+---
 
-- Per run: `~/.power_test/history/<group_key>/<run-id>/{config.json,
-  metrics.json, report.html, summary.txt}`. `<group_key>` is
-  the `--model-alias` (if set) or the model name.
-- Per model dashboard (M7):
-  `~/.power_test/history/<group_key>/index.html`
-  (auto-regenerated on every `run` save, also re-renderable
-  via `power_test dashboard [<NAME>]`).
-- A run-id is `YYYYMMDD-HH-mm-ss-XXXXXX` in the host's
-  **local timezone** (not UTC) with a 6-hex-char random
-  suffix. The timestamp is what `ls` shows; the suffix
-  defends against same-second collisions. The last 6 hex
-  chars (the suffix) are enough to refer to it in chat.
+## Step 5 · 负载模式 + 规模
 
-## TPM / RPM (for SLA conversations)
+**问用户**（4 选 1）：
 
-`summary.txt` already prints the per-second throughput
-numbers. For the SLA the operator usually wants the
-per-minute rate. The conversion:
+> 用哪种压测模式？
+>
+> | 选项 | 模式 | 适用问题 | 追问规模 |
+> |---|---|---|---|
+> | **A** | constant（恒定） | 稳态吞吐/延迟 | RPS？持续秒数？ |
+> | **B** | ramp（升压） | 延迟随压力怎么变 | 起始 RPS → 结束 RPS？持续秒数？ |
+> | **C** | spike（尖峰） | 突发流量扛不扛得住 | 基线 RPS？尖峰 RPS？尖峰时刻？持续秒数？ |
+> | **D** | soak（长跑） | 1 小时后还稳不稳 | RPS？持续秒数？ |
 
-```
-RPM                      = achieved_rps              × 60
-TPM (output tokens / min) = output_throughput_tps     × 60
-TPM (total tokens / min)  = total_throughput_tps      × 60
+**默认**：A。
+
+**默认值（用户不答时用）**：
+
+| 字段 | 默认 |
+|---|---|
+| RPS | 1 |
+| duration | 60s |
+| concurrency | = RPS（让测试自然，不人为挤队列） |
+| pattern | constant |
+
+按用户选择追问具体规模。
+
+---
+
+## Step 6 · prompt 来源
+
+**问用户**（4 选 1）：
+
+> 用什么 prompt？
+>   1. **builtin**（默认）— 内置 10 个混合长度 prompt，覆盖中英文
+>   2. **literal**（我给你一段文字）— 单条 static prompt
+>   3. **JSON/JSONL 文件** — 自定义 prompt 列表
+>   4. **ShareGPT 文件** — ShareGPT 格式
+>   5. **多轮 TOML** — 测 cache 命中
+
+**默认**：1（builtin）。
+
+按答案追问：
+- 2：追问 prompt 文本
+- 3/4：追问文件绝对路径
+- 5：追问 TOML 路径 + `static_multi` / `dynamic_multi` 哪个
+
+---
+
+## Step 7 · Review & Run
+
+把拼好的命令回显给用户。模板：
+
+```bash
+power_test run \
+  --target <URL> \
+  --api <KIND> \
+  --api-key <KEY>        # 或省略，如果用环境变量 \
+  --model <NAME> \
+  --rps <R> --duration <S> \
+  --dataset <KIND> \
+  --tag '<model>-rps<R>-dur<S>' \
+  --log-level info
 ```
 
-For a one-line SLA report (paste-into-ticket), pull the
-numbers straight from `metrics.json`:
+**问用户**：
 
-```powershell
-$j = Get-Content "$env:USERPROFILE\.power_test\history\<model>\<run>\metrics.json" | ConvertFrom-Json
-"  RPM:                $($j.achieved_rps * 60)"
-"  TPM (output):       $($j.output_throughput_tps * 60)"
-"  TPM (total):        $($j.total_throughput_tps * 60)"
-"  p50 latency (ms):   $($j.avg_latency_ms)"
-```
+> 看起来对吗？
+>   1. **跑**
+>   2. **改** — 告诉我要改什么（哪一项改成什么）
+>   3. **取消**
 
-Vendor SLA tables usually quote **TPM (output)** for
-generation cost, or **RPM** for concurrency, or both.
-Match the formula to the contract.
+跑 `power_test run <...>`。
 
-The full 3-report SLA workflow — vendor side + our side +
-latency-overhead diff — lives in `power-test-onboard`.
+**跑完后给用户 4 样东西**：
 
-## Failure handling
+1. run_id 后 6 位（够在对话里指代这次跑）
+2. `report.html` 的绝对路径（用户浏览器打开看图）
+3. `summary.txt` 里的 p50 / p99，**原文照抄**（不要"四舍五入"、不要从图表上读数）
+4. 一句话说明这是哪种测试：
+   - "短 prompt（≤16 token）延迟基准" — 适合 SLA 对话
+   - "全 prompt（256 token 默认）端到端吞吐" — 适合容量规划
 
-- **Build fails with `Permission denied` on a `.exe`**:
-  another `power_test.exe` is still running. Find and kill
-  it: `Get-Process -Name power_test | Stop-Process -Force`.
-  Do not retry the build blindly.
-- **Run hangs for > 5s after `--duration` should have
-  elapsed**: the `Notify` cancel had a known race in M1–M2
-  builds; the M5+ build has a `start.elapsed() >= duration`
-  guard. If you inherit an older build, kill the process
-  and rebuild.
-- **All requests return `0: N` in `status codes` and
-  `[N] transport: …` in `errors`**: the target refused or
-  the request body is malformed for that `--api`. Verify
-  `--target` is reachable (`curl -I <url>`) and that
-  `--api` matches the endpoint family. Use
-  `--log-level debug` to see the wire-level request.
-- **`401 Unauthorized`**: missing or wrong `--api-key` /
-  `OPENAI_API_KEY`. For OpenAI-compatible local servers
-  you can drop the env var; for hosted ones you need a
-  real key.
-- **`TOML parse error` from `--config`**: run
-  `cargo test --test e2e e2e_print_config_emits_valid_toml`
-  to see the canonical schema. Or run `power_test run
-  --print-config --log-level error` against a clean TOML
-  and re-format.
-- **`unknown --api 'X'` / `unknown --pattern 'X'`**: the
-  validator only accepts `openai|anthropic|raw` and
-  `constant|ramp|spike|soak`. Suggest the closest match
-  to the user.
+**接下来问用户**：
 
-## Windows (win32) platform notes
+> 要不要：
+>   - 对比另一次压测？ → 交给 `power-test-compare`
+> - 拿这组数字去验证 SLA（接新模型）？ → 交给 `power-test-onboard`
+> - 收工
 
-The binary path on this host is
-`D:\MyCodes\Rust\power_test`. Use PowerShell syntax.
-`cargo` and the binary are both first-class Windows
-processes; no WSL / Git-Bash layer is needed.
+---
 
-- Always quote paths that contain spaces. `--config
-  "C:\Users\myg13\My Config\power_test.toml"` works.
-- Forward slashes in TOML paths also work on Windows, but
-  backslashes inside TOML strings need to be escaped
-  (`\\`).
-- If you need to feed stdin / pipe a JSON file, use
-  `Get-Content -Raw -Encoding UTF8 <file>` — never
-  `cat`, which PowerShell 5.1 silently ANSI-decodes.
-- For background runs that should survive a model turn,
-  use the harness's `run_in_background: true` rather than
-  `Start-Process -NoNewWindow` — the harness can then resume
-  on completion.
+## 附：默认值速查
 
-## See also
+| 字段 | 默认值 |
+|---|---|
+| `--api` | openai |
+| `--pattern` | constant |
+| `--rps` | 1 |
+| `--duration` | 60s |
+| `--concurrency` | = RPS |
+| `--dataset` | builtin |
+| `--max-tokens` | 256 |
+| `--stream` | true |
+| `--tag` | `<model>-rps<R>-dur<S>` |
+| `--api-key` | `$OPENAI_API_KEY` / `$ANTHROPIC_API_KEY` 环境变量 |
+| `--log-level` | info |
 
-- `references/patterns-and-datasets.md` — every pattern ×
-  every dataset combo with the exact flag set and a
-  one-line rationale.
-- `references/report-interpretation.md` — what TTFT / ITL /
-  TPS / latency percentiles mean, what's "good", and the
-  common failure shapes you should report up. Includes the
-  TPM / RPM math for SLA conversations.
-- `power-test-compare` — for two-run side-by-side diff
-  (text or HTML).
-- `power-test-onboard` — for the 3-report SLA workflow
-  when bringing a new upstream online.
+任何字段用户不答 → 用默认值。
+
+---
+
+## 故障处理
+
+| 现象 | 处理 |
+|---|---|
+| 用户答"我不知道" / "随便" | 用默认值，问"按默认跑？" |
+| URL 不可达 | 让用户先 `curl -I <URL>` 验证 |
+| model 端点不识别 | 让用户先 `curl -H "Authorization: Bearer $KEY" <URL>/models` 验证 |
+| 跑出来全 401 | key 不对 / 没传 / 环境变量没 export |
+| 跑出来全 4xx | 大概率 `--api` 选错了，回到 Step 2 |
+| 用户中途要"对比" | 收尾，交给 `power-test-compare` |
+| 用户中途要"接新模型" | 收尾，交给 `power-test-onboard` |
+| 用户要"保存这次配置" | 引导：`power_test run --print-config > ./power_test.toml` 存盘 |
+
+---
+
+## 进阶
+
+- **复用配置**：把上面的命令存成 `power_test.toml`，下次 `power_test run --config ./power_test.toml`。
+- **批量轮换 prompt**：用 `--dataset custom --custom-path <file.jsonl>` 跑真业务流量。
+- **长时间稳定性**：用 `--pattern soak`，自动每 N 秒写一次 `metrics.json` checkpoint。
+- **跨环境对比**：跑两次（环境 A / 环境 B）后用 `power-test-compare`。
+
+---
+
+## 参考
+
+- `references/patterns-and-datasets.md` — 每个 pattern × 每个 dataset 组合的 flag 和适用场景
+- `references/report-interpretation.md` — TTFT/ITL/TPS/p99 怎么读、怎么算 TPM/RPM
+- `power-test-compare` — 两次压测并排 diff
+- `power-test-onboard` — 上游 + 我方 3 报告 SLA 流程

@@ -1,165 +1,158 @@
 ---
 name: power-test-compare
 description: |
-  Compare two `power_test` runs side-by-side (HTML diff page
-  or text report). Use when the user has two run_ids and wants
-  a delta across latency / TTFT / ITL / TPS / cache /
-  throughput, OR when they want a regression report after a
-  code / config / endpoint change. Cross-target compare is
-  supported (same model, different endpoint) and produces a
-  "different target" warning by design — that is the
-  upstream-vs-our pattern. For the 3-report SLA workflow
-  (vendor + ours + diff) use `power-test-onboard` instead.
-  For a single-endpoint stress test use `power-test-run`.
+  Compare two `power_test` runs side-by-side (HTML diff page or text
+  report). Use when the user has two run_ids and wants a delta across
+  latency / TTFT / ITL / TPS / cache / throughput, OR when they want a
+  regression report after a code / config / endpoint change.
+  Cross-target compare is supported (same model, different endpoint)
+  and produces a "different target" warning by design — that is the
+  upstream-vs-our pattern. For the 3-report SLA workflow (vendor +
+  ours + diff) use `power-test-onboard` instead. For a single-endpoint
+  stress test use `power-test-run`.
 ---
 
-# power-test-compare (two-run side-by-side diff)
+# power-test-compare（两 run 对比 · 引导式）
 
-This is the diff skill. The inputs are two run_ids; the
-output is `compare-<a>-vs-<b>.html` (with `--html`) or a
-text delta. Cross-target compare is supported — the
-compare header flags `different target` by design, which
-is the whole point of the upstream-vs-our pattern in
-`power-test-onboard`.
+> 一次只问用户一件事。等用户回答再进下一步。
+> 用户如果直接给两个 run_id，跳到 Step 3。
 
-## Inputs
+---
 
-- **`<RUN_A>` / `<RUN_B>`**: the two `power_test run` ids.
-  These are the timestamped strings printed in the run
-  output, e.g. `20260808-11-28-15-1db22a`. Both runs must
-  be in the history (`~/.power_test/history/<group>/<id>/`).
-- **`--history-dir <path>`** (optional): override the
-  default history root. Useful for CI or eval harnesses
-  that pin a known location.
-- **`--html`**: render the compare as a self-contained
-  HTML page. Without it, the diff is plain text (ANSI-
-  colorized when stdout is a TTY).
-- **`--no-color`**: when running in a non-TTY capture (CI
-  log, redirected to file) where ANSI codes would corrupt
-  the output.
+## Step 1 · Run A
 
-## Procedure
+**问用户**：
 
-1. **Get the two run_ids.** The user usually has them in
-   their recent terminal output. If not, list them:
+> 第一次压测的 run_id 是什么？形如 `20260808-11-28-15-1db22a`。
+>
+> 不知道？选一个：
+>   1. **我告诉你**（贴 run_id 或后 6 位）
+>   2. **帮我找最近的**（我跑 `power_test list` 给你看最近的 10 次）
 
-   ```powershell
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe list
-   ```
+**如果用户选 2**：
 
-   Or open the per-model dashboard at
-   `~/.power_test/history/<model>/index.html` and read the
-   run_ids from the table (M7).
+```bash
+power_test list
+```
 
-2. **Run compare.**
+把输出按"模型 / tag / 时间"展示，让用户挑。
 
-   ```powershell
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe compare `
-       <RUN_A> <RUN_B> --html
-   ```
+---
 
-   Output lands at
-   `~/.power_test/history/compare-<RUN_A>-vs-<RUN_B>-<ts>.html`.
+## Step 2 · Run B
 
-3. **Open the HTML.** The compare page is the
-   authoritative view. It renders a side-by-side table
-   with A's value, B's value, the absolute delta, and the
-   percent delta, color-coded by direction:
-   - **Green**: improvement. For latency / TTFT / ITL,
-     lower is better, so B < A is green. For TPS / RPS /
-     success rate, higher is better, so B > A is green.
-   - **Red**: regression. The opposite.
-   - **Grey**: unchanged. The 0.5% tolerance threshold
-     means a < 0.5% delta is colored neutral.
+**问用户**：
 
-4. **Or read the text output.** Without `--html`, the
-   same delta is printed as a plain-text table — useful
-   for piping into a log or PR description.
+> 第二次压测的 run_id 是什么？
 
-## What the diff contains
+同样的"帮我找"选项。
 
-The compare page renders every metric three times: A's
-value, B's value, the delta. The metric set:
+---
 
-- **Latency p50 / p90 / p99 / p99.9** — the headline
-  numbers. p99 is the one to watch for regressions.
-- **TTFT p50 / p99** — time-to-first-token. Drops here
-  usually mean a faster prefill path; increases usually
-  mean the prefill is now longer (e.g. a system prompt
-  got bigger, or the new model has a heavier prefill).
-- **ITL mean / p99** — inter-token latency. p99 spikes
-  often correlate with a model that started a
-  long-running speculative step.
-- **TPS mean / p99** — generation throughput. Often
-  trades against TTFT (faster prefill → more tokens, or
-  vice versa).
-- **Achieved RPS** — what the runner actually delivered.
-  Drops with stable target RPS mean back-pressure; with
-  `--pattern ramp` it can also mean the new build
-  crashed mid-run.
-- **Total / success counts**, **errors**, **prompt
-  cache** hit rate.
-- **Throughput** (output tok/s, total tok/s, TPOT, avg
-  input / output tokens, avg turns/req).
+## Step 3 · 输出格式
 
-For a token-reseller upstream-vs-our diff (the
-`power-test-onboard` pattern), the metrics to focus on
-are the latency overhead columns:
-- **Latency p50 / p99**: our p50 should be ≤ 1.5×
-  upstream's; our p99 should be ≤ 2.0× upstream's
-  (single-hop, same-region). Multi-hop / cross-region
-  legitimately costs more and that has to be on the SLA
-  page.
-- **TTFT p50 / p99**: our p50 should be ≤ 1.3×
-  upstream's.
-- **TPS mean**: within a few percent of upstream. If our
-  is dramatically lower, our layer is serializing
-  streaming.
+**问用户**：
 
-## Failure handling
+> 要哪种？
+>   1. **HTML**（默认，浏览器打开看图）
+>   2. **纯文本**（适合贴 PR / 飞书 / 钉钉）
 
-- **`run A not found` / `run B not found`**: one of the
-  run_ids is wrong or the run was moved. `power_test
-  list` shows what's actually in the history.
-- **`index.json is corrupt` / falling back to scan**:
-  the history index is broken. Compare still works
-  (it scans the directory), but slower. Fix the index
-  by re-saving any one of the listed runs (its
-  `save_run` rebuilds the index).
-- **Compare header says `different target` / `different
-  model alias`**: by design. These are the upstream-vs-
-  our pattern, or the dated-snapshot pattern (M6g).
-  The diff is still computed; just note that the
-  comparison is across different logical surfaces.
+**默认**：1。
 
-## Cross-target compare (the onboarding use case)
+---
 
-Same model, different target URL is the upstream-vs-our
-pattern. The compare page renders the diff; the header
-flags it as `different target`. To read the diff:
+## Step 4 · Review & Run
 
-1. Open `compare-<upstream>-vs-<our>.html`.
-2. Look at the latency overhead columns (see
-   "What the diff contains" above).
-3. Check the prompt-cache hit rate: our `turn 2+`
-   should be close to upstream's if our stack is
-   correctly forwarding the prefix.
-4. The throughput delta is usually small (within a
-   few percent of upstream). A big delta = our layer
-   is bottlenecking.
+**回显命令**：
 
-The full 3-report SLA workflow — vendor side + our
-side + latency-overhead diff with hand-off checklists
-to vendor-management / customer-success / engineering
-— lives in `power-test-onboard`.
+```bash
+power_test compare <RUN_A> <RUN_B> --html
+# 或不加 --html 走纯文本
+```
 
-## See also
+**问用户**：
 
-- `references/compare-interpretation.md` — what each
-  diff row means, the color-class rules, the upstream
-  vs our latency-overhead budget, and the
-  regression-shapes to call out.
-- `power-test-run` — for a single-endpoint stress test
-  (and for how to find the run_ids in the first place).
-- `power-test-onboard` — the 3-report SLA workflow
-  built on top of run + compare.
+> 这样对吗？
+>   1. **跑**
+>   2. **改 / 取消**
+
+跑命令。
+
+---
+
+## 跑完后的交付
+
+给用户：
+
+### 1. 报告路径
+
+```
+~/.power_test/history/compare-<RUN_A>-vs-<RUN_B>-<ts>.html
+```
+
+（如果纯文本就贴终端输出）
+
+### 2. Top 3 变化
+
+按 `|%delta|` 排序，挑出最大的 3 个指标，**说方向**：
+
+```
+最大的变化：
+  + latency p99:    1500ms → 2200ms  (+47%, 退步)  🔴
+  + ttft p50:        200ms →  180ms  (-10%, 改进)  🟢
+  +  achieved_rps:  2.05   →  1.97   (-4%,  退步)  🟡
+```
+
+### 3. 上下游对比特别提示
+
+如果对比 header 写了 `different target`：
+
+> 这是**跨端点**对比（model 一样，URL 不一样）。常见用途是：
+> - **上游 vs 我方**（厂商 → 我们的网关）→ 看 latency overhead
+> - **同一模型不同时刻**（上线前 vs 上线后）→ 看回归
+>
+> 上游 vs 我方的 SLA 预算（粗略）：
+> - latency p50（我方）≤ 1.5 × 上游 p50
+> - latency p99（我方）≤ 2.0 × 上游 p99
+> - ttft p50（我方）≤ 1.3 × 上游 p50
+> - tps（我方）在上游 ±5% 内
+>
+> 任何一项超出就值得开个工单排查我方栈。
+
+如果 header 写了 `different model alias`：
+
+> 这是**同模型别名**对比（M6g 模式，比如 `DeepSeek-V4-Flash-20260115` vs `DeepSeek-V4-Flash-20260301` 归到同一个 `DeepSeek-V4-Flash` 别名下）。看的是**版本间回归**，不是跨端点。
+
+### 4. 下一步
+
+> 要不要：
+> - 把这次对比加到 PR 描述？ → 帮你拼一段 markdown
+> - 接新模型 SLA 验证？ → 交给 `power-test-onboard`
+> - 收工
+
+---
+
+## 故障处理
+
+| 现象 | 处理 |
+|---|---|
+| `run A not found` / `run B not found` | 让用户跑 `power_test list` 看实际 run_id |
+| 报告说 `index.json is corrupt` | 索引坏了但能跑（目录扫描 fallback）。修索引：再 `power_test run` 任意一次 |
+| 报告里没数字 / 全 0 | 两次压测里至少一次是 0 成功 → 让用户去 `summary.txt` 看 |
+| 纯文本输出乱码 | 跑 `chcp 65001` 后重试，或加 `--no-color` |
+
+---
+
+## 进阶
+
+- **多维度 diff**：跑 3+ 次压测，**两两** compare，挑出最异常的。
+- **回归脚本**：把 `power_test run` + `power_test compare` 串成 CI step，PR 跑两次（base / head）→ 自动 diff → 阈值告警。
+- **完整 SLA 流程**：上游 + 我方 → 3 报告 = `power-test-onboard`。
+
+---
+
+## 参考
+
+- `references/compare-interpretation.md` — 每个 diff 行的含义、颜色规则、上下游预算表
+- `power-test-run` — 怎么跑出 run_id
+- `power-test-onboard` — 3 报告 SLA 完整流程

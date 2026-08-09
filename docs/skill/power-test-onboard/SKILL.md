@@ -1,263 +1,239 @@
 ---
 name: power-test-onboard
 description: |
-  Onboard a new upstream model in a token-reseller setup:
-  stress-test the vendor endpoint AND our own fronting
-  endpoint with the same shape, then produce a 3-report SLA
-  bundle (upstream TPM/RPM, our TPM/RPM, latency-overhead
-  diff). Use when the team is its own token vendor and needs
-  to validate TPM/RPM against the upstream contract AND
-  the downstream SLA. Hands the three reports to
-  vendor-management, customer-success, and engineering
-  respectively. For a single-endpoint stress test use
-  `power-test-run`. For a two-run diff without the SLA
-  scaffolding use `power-test-compare`.
+  Onboard a new upstream model in a token-reseller setup: stress-test
+  the vendor endpoint AND our own fronting endpoint with the same
+  shape, then produce a 3-report SLA bundle (upstream TPM/RPM, our
+  TPM/RPM, latency-overhead diff). Use when the team is its own token
+  vendor and needs to validate TPM/RPM against the upstream contract
+  AND the downstream SLA. Hands the three reports to
+  vendor-management, customer-success, and engineering respectively.
+  For a single-endpoint stress test use `power-test-run`. For a
+  two-run diff without the SLA scaffolding use `power-test-compare`.
 ---
 
-# power-test-onboard (3-report SLA workflow for new upstreams)
+# power-test-onboard（上游/我方 3 报告 SLA · 引导式）
 
-When the team is its own model-token vendor (your service
-sits between the upstream model vendor and your downstream
-customers), every new upstream model needs **two** stress
-tests plus one diff:
+> 一次只问用户一件事。等用户回答再进下一步。
+> 用户如果一次给齐了所有信息（"接新模型 X，上游 URL=A 我们 URL=B，1 RPS 60 秒"），跳到 Step 2。
 
-1. **Upstream** — exercise the vendor's API directly. The
-   numbers go on the contract / SLA negotiation table; if
-   achieved TPM / RPM are below the vendor's published
-   limit, open a ticket asking them to lift TPM / RPM.
-2. **Our** — exercise your own endpoint that fronts the
-   vendor. The numbers are the SLA you commit to your
-   downstream customers. Verify our TPM / RPM actually
-   meet what you promised.
-3. **Compare** — diff the two runs. The interesting number
-   is **our latency overhead vs upstream's** at the same
-   model. Big overhead = our stack adds cost; the
-   customer pays for that, so it has to be visible.
+**这套流程什么时候用**：你的团队是个 token reseller——你从上游厂商买 token，包装后卖给你的客户。新上一个模型，要同时验证两件事：
 
-All three run with the **same model name and the same
-shape** (RPS, duration, concurrency, prompt, max-tokens)
-so the diff isolates the upstream↔our layer. History is
-grouped by model (M6f), so both runs land in the same
-`<root>/<model>/` folder and show up in each other's
-compare-with dropdown. The per-model dashboard (M7)
-lists both rows with their `-upstream` / `-our` tags.
+- **厂商侧**：厂商承诺的 TPM/RPM，实际能给到吗？
+- **我方侧**：我方网关 + 我方的限流 + 我方的转发，实测 TPM/RPM 是多少？要写进给客户的 SLA 合同。
+- **diff**：我方栈在厂商基础上加了多少 latency？客户付的"中间商溢价"是多少。
 
-## When to run
+---
 
-- A new upstream model is being brought online in a
-  token-reseller setup.
-- The vendor publishes a TPM / RPM; you want to know what
-  you actually get before signing the contract.
-- You commit a TPM / RPM SLA to your customers; you want
-  to know what your stack actually delivers before
-  quoting the number.
-- The model is the same on both sides (you resell tokens
-  for the same model the vendor sells). The point of the
-  compare is your overhead, not a model-quality diff.
+## Step 1 · 测试规格（4 件事一次问清）
 
-Skip this if the two sides serve different model families
-— that's an M-series compare via `power-test-compare`,
-not this workflow.
+**问用户**：
 
-## Inputs to collect
+> 测试规格定一下，4 件事：
+>
+> 1. **模型名？**（如 `qwen36-27B`）— **两边必须用一模一样的字符串**（这是 history 的分组 key）
+> 2. **压测规模？** RPS / duration / concurrency（默认 **1 RPS × 60s × 并发 2**）
+> 3. **max-tokens？**（默认 **32**，压短响应让 cache 行为可见）
+> 4. **prompt？**
+>    - **builtin pool**（默认，混合长度）
+>    - **多轮 TOML**（要测 cache 命中，路径问一下）
 
-- **`<upstream-url>`** and **`<upstream-key>`**: the
-  vendor's chat-completions / messages endpoint and
-  bearer / `x-api-key` token. For OpenAI-compatible
-  vendors, the URL ends in `/v1/chat/completions`; for
-  Anthropic, `/v1/messages`.
-- **`<our-url>`** and **`<our-key>`**: your own endpoint
-  that fronts the vendor. Same `--api` shape.
-- **`<model>`**: the model name as the vendor names it
-  (and as your endpoint exposes it). Use the **same**
-  string for both runs — the model name is the
-  group key in the history, and breaking it would put
-  the two runs in different folders.
-- **`<rps>` / `<duration>` / `<concurrency>`**: the
-  shape. For a 27B-class model on a remote vendor, a
-  sensible starting point is **1 RPS × 60s ×
-  concurrency 2** — bump after the first run if
-  achieved RPS is comfortably on target.
-- **`<max-tokens>`**: keep it low (32) so the per-turn
-  response is short and the cache pressure is visible.
-  Both runs must use the same `--max-tokens`, otherwise
-  TPS and the cache shape are not comparable.
-- **`--stream`**: same on both sides (almost always
-  `true`; you need streaming to get TTFT / ITL / TPS).
-- **`<prompt>` / `<dataset>`**: same on both sides.
-  For latency benchmarks, `--prompt "Reply with the
-  single word: ok" --max-tokens 16`. For multi-turn
-  cache tests, use the M6 multi-turn TOML dataset.
-- **SLA TPM / RPM (optional)**: if you have a contracted
-  number, pass it to the SLA check in step 4. Without
-  it, the pass/fail thresholds default to the
-  "Investigate" zone in `references/onboarding.md`.
+**确认**：用户给的 4 件事一致（尤其是 model 字符串一致），再进 Step 2。
 
-## Tag convention (suffix form)
+---
 
-Append a role suffix to the tag so `power_test list` and
-the per-model dashboard make the role obvious:
+## Step 2 · 上游厂商端点
 
-```
-<model>-rps<N>-dur<S>-upstream     # vendor-side run
-<model>-rps<N>-dur<S>-our         # our-side run
+**问用户**：
+
+> 上游厂商的：
+>   1. **URL？**（如 `https://api.deepseek.com/v1/chat/completions`）
+>   2. **API key？** 或"我已经设了 `OPENAI_API_KEY`"
+>   3. **协议？** openai / anthropic（默认 openai）
+
+**校验**：URL 合法 + key 非空（除非用户说"环境变量"）。
+
+---
+
+## Step 3 · 跑上游
+
+构造命令：
+
+```bash
+power_test run \
+  --target <UPSTREAM_URL> \
+  --api <KIND> \
+  --api-key <UPSTREAM_KEY> \
+  --model <MODEL> \
+  --rps <R> --duration <S> --concurrency <K> \
+  --max-tokens <T> --stream true \
+  --dataset <KIND> \
+  --tag '<MODEL>-rps<R>-dur<S>-upstream' \
+  --log-level info
 ```
 
-Example for `qwen36-27B` at 1 RPS × 60 s:
+跑。**捕获 run_id = `RUN_UPSTREAM`**。
+
+跑完告诉用户：
 
 ```
---tag 'qwen36-27b-rps1-dur60-upstream'
---tag 'qwen36-27b-rps1-dur60-our'
+上游跑完了。
+  run_id   : 20260808-11-28-15-1db22a
+  report   : ~/.power_test/history/<MODEL>/20260808-11-28-15-1db22a/report.html
+  summary  : ~/.power_test/history/<MODEL>/20260808-11-28-15-1db22a/summary.txt
+  关键指标 : p50=...ms p99=...ms ttft_p50=...ms rps=...
 ```
 
-Both runs keep the **same `--model`** (the model name is
-the group key, not the tag). Don't use `--model-alias`
-for this — alias is for grouping **dated snapshots of the
-same logical model** (M6g); upstream/our is a different
-axis.
+让用户**确认**这组数字合理（没全 401、没全 timeout、p50 数量级对）再进 Step 4。
 
-## Procedure
+---
 
-1. **Upstream run** — the vendor side.
+## Step 4 · 我方端点
 
-   ```powershell
-   $env:OPENAI_API_KEY = '<upstream-key>'
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe run `
-       --target '<upstream-url>' `
-       --api openai --model <model> `
-       --rps <N> --duration <S> --concurrency <K> `
-       --dataset custom `
-       --custom-path D:\MyCodes\Rust\power_test\docs\examples\datasets/multi-turn-conversation.toml `
-       --request-strategy round-robin `
-       --max-tokens <T> --stream true `
-       --tag '<model>-rps<N>-dur<S>-upstream'
-   ```
+**问用户**：
 
-   The terminal prints the run id (e.g.
-   `20260808-11-28-15-1db22a`). Capture it as `RUN_UPSTREAM`.
+> 我方自己的：
+>   1. **URL？**（如 `https://api.mycompany.com/v1/chat/completions`）
+>   2. **API key？** 或"用环境变量"
+>   3. **协议？** 默认跟上游一致
 
-2. **Our run** — your side. Override the env var so we
-   don't accidentally hit the vendor with our key:
+**警告**：提醒用户 key 别搞混——我方 key 调的是我方端点，不会打到上游。
 
-   ```powershell
-   $env:OPENAI_API_KEY = '<our-key>'
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe run `
-       --target '<our-url>' `
-       --api openai --model <model> `
-       --rps <N> --duration <S> --concurrency <K> `
-       --dataset custom `
-       --custom-path D:\MyCodes\Rust\power_test\docs/examples/datasets/multi-turn-conversation.toml `
-       --request-strategy round-robin `
-       --max-tokens <T> --stream true `
-       --tag '<model>-rps<N>-dur<S>-our'
-   ```
+---
 
-   Capture as `RUN_OUR`.
+## Step 5 · 跑我方
 
-3. **Compare** — the diff.
+构造命令（**所有规模参数和 Step 1 一字不差**）：
 
-   ```powershell
-   & D:\MyCodes\Rust\power_test\target\debug\power_test.exe compare `
-       $RUN_UPSTREAM $RUN_OUR --html
-   ```
+```bash
+power_test run \
+  --target <OUR_URL> \
+  --api <KIND> \
+  --api-key <OUR_KEY> \
+  --model <MODEL> \
+  --rps <R> --duration <S> --concurrency <K> \
+  --max-tokens <T> --stream true \
+  --dataset <KIND> \
+  --tag '<MODEL>-rps<R>-dur<S>-our' \
+  --log-level info
+```
 
-   The compare-*.html lands at
-   `~/.power_test/history/compare-<RUN_UPSTREAM>-vs-<RUN_OUR>-<ts>.html`.
+跑。**捕获 run_id = `RUN_OUR`**。
 
-4. **Extract TPM / RPM** — the SLA numbers. Both
-   `summary.txt` and the dashboard carry them, but
-   `metrics.json` is the source of truth for piping
-   into a ticket or a sheet:
+跟 Step 3 一样给一份"我方关键指标"。
 
-   ```powershell
-   function Get-SlaNumbers {
-       param([string]$RunId, [string]$Model)
-       $j = Get-Content "$env:USERPROFILE\.power_test\history\$Model\$RunId\metrics.json" | ConvertFrom-Json
-       [PSCustomObject]@{
-           run_id          = $RunId
-           rpm             = [math]::Round($j.achieved_rps * 60, 1)
-           tpm_output      = [math]::Round($j.output_throughput_tps * 60, 0)
-           tpm_total       = [math]::Round($j.total_throughput_tps * 60, 0)
-           p50_latency_ms  = [math]::Round($j.avg_latency_ms, 1)
-           ttft_p50_ms     = [math]::Round($j.avg_ttft_ms, 1)
-       }
-   }
-   $up = Get-SlaNumbers -RunId $RUN_UPSTREAM -Model '<model>'
-   $us = Get-SlaNumbers -RunId $RUN_OUR     -Model '<model>'
-   $up; $us
-   ```
+---
 
-5. **Hand off the three reports:**
+## Step 6 · 对比
 
-   - **Vendor management** gets the upstream `summary.txt`
-     + `report.html`. If achieved TPM / RPM are below
-     the vendor's published limit, attach the report
-     to a vendor ticket asking them to lift TPM / RPM.
-   - **Customer success** gets the our-side `summary.txt`
-     + `report.html`. If our TPM / RPM are below the
-     SLA you quoted, don't quote that SLA; either
-     raise it on the contract, or constrain the
-     customer's usage.
-   - **Engineering** gets the compare-*.html. Look at
-     the latency-overhead columns (our p50 / p99 vs
-     upstream's). That is the cost your layer adds
-     per request.
+```bash
+power_test compare <RUN_UPSTREAM> <RUN_OUR> --html
+```
 
-## Pass / fail criteria
+报告落地：
 
-These are starting points, not contracts. Tune them per
-model and per workload. Full table in
-`references/onboarding.md`.
+```
+~/.power_test/history/compare-<RUN_UPSTREAM>-vs-<RUN_OUR>-<ts>.html
+```
 
-| Check | Pass | Investigate | Fail |
+**预期**：header 会写 `different target`（model 一样 URL 不一样）。这是设计内的，别以为出错了。
+
+---
+
+## Step 7 · 提取 SLA 数字
+
+跑 `Get-SlaNumbers` 脚本（已经在 `references/onboarding.md`，agent 跑就行），输出表：
+
+```
+  side       RPM   TPM(out)  TPM(total)  p50  p99  TTFT_p50  achieved_rps
+  upstream    60    1800      2400        500  1500  200       1.02
+  our         58    1740      2310        700  1800  280       0.98
+  overhead   -3%   -3%       -4%         +40% +20%  +40%      -4%
+```
+
+按 7 项 pass/fail 给出判断（标准在 `references/onboarding.md`）：
+
+| 检查项 | Pass | Investigate | Fail |
 |---|---|---|---|
-| **Achieved RPS** | ≥ 0.98 × target | 0.95-0.98 × target | < 0.95 × target |
-| **Latency p50 (ours)** | ≤ 1.5 × upstream p50 | 1.5-2.0 × upstream | > 2.0 × upstream |
-| **Latency p99 (ours)** | ≤ 2.0 × upstream p99 | 2.0-3.0 × upstream | > 3.0 × upstream |
-| **TTFT p50 (ours)** | ≤ 1.3 × upstream p50 | 1.3-1.8 × upstream | > 1.8 × upstream |
-| **TPM (output) SLA** | achieved ≥ committed | achieved 90-100% of committed | achieved < 90% of committed |
-| **Errors** | 0 | < 2% of total | ≥ 2% of total |
-| **Skipped ticks** | < 5% of scheduled | 5-15% of scheduled | > 15% of scheduled (back-pressure) |
+| 达成 RPS / 目标 RPS | ≥ 98% | 95-98% | < 95% |
+| 我方 p50 / 上游 p50 | ≤ 1.5× | 1.5-2.0× | > 2.0× |
+| 我方 p99 / 上游 p99 | ≤ 2.0× | 2.0-3.0× | > 3.0× |
+| 我方 TTFT_p50 / 上游 | ≤ 1.3× | 1.3-1.8× | > 1.8× |
+| TPM / SLA 承诺 | ≥ 承诺 | 90-100% | < 90% |
+| 错误率 | 0 | < 2% | ≥ 2% |
+| skipped ticks | < 5% | 5-15% | > 15% |
 
-## Output contract
+**给一个总体判定**：3 报告 SLA 整体 **PASS** / **Investigate** / **FAIL**。
 
-- `~/.power_test/history/<model>/<RUN_UPSTREAM>/report.html`
-  and `summary.txt` — vendor side.
-- `~/.power_test/history/<model>/<RUN_OUR>/report.html`
-  and `summary.txt` — our side.
-- `~/.power_test/history/compare-<RUN_UPSTREAM>-vs-<RUN_OUR>-<ts>.html`
-  — diff.
-- `~/.power_test/history/<model>/index.html` — per-model
-  dashboard (M7) listing both runs side-by-side.
+---
 
-All three reports go to different teams. See
-`references/onboarding.md` for the hand-off checklist
-per recipient.
+## Step 8 · 交付（按角色分）
 
-## What this workflow does NOT cover
+### 8.1 给"供应商管理"
 
-- **Different model families on the two sides** — that's
-  an M-series compare, not this one. Use
-  `power-test-compare` for a model-quality diff and
-  ignore the upstream/our framing.
-- **Streaming vs non-streaming mismatches** — both runs
-  must use the same `--stream` setting, otherwise ITL
-  / TPS are not comparable.
-- **Different `--max-tokens` between the two sides** —
-  that changes TPS and the cache shape; not comparable.
-- **Long-soak stability (> 1 h)** — both sides need a
-  soak run with `--pattern soak`, and the TPM / RPM
-  numbers should be re-evaluated on the latest
-  snapshot, not the initial 60 s average.
-- **Cross-region latency** — the compare shows it; the
-  question is whether the customer's SLA accepts it.
+交付：
+- 上游 `summary.txt`
+- 上游 `report.html`
+- TPM/RPM 实测 vs 厂商宣传值
 
-## See also
+如果实测 < 厂商承诺：**起草 vendor ticket**（agent 帮你写草稿）：
 
-- `references/onboarding.md` — full walkthrough, TPM /
-  RPM math, `jq` one-liner for the SLA report,
-  per-recipient hand-off checklist.
-- `power-test-run` — the single-endpoint stress test
-  (one of the two building blocks).
-- `power-test-compare` — the two-run diff (the other
-  building block).
+> 主题：TPM 提升请求 — <MODEL>
+>
+> 测得 TPM（output）=<X>，低于贵方宣传的 <Y>。
+> 测试条件：1 RPS × 60s, max_tokens=32, 模型 <MODEL>。
+> 完整 report.html 见附件。
+> 请确认实际配额并告知可释放上限。
+
+### 8.2 给"客户成功"
+
+交付：
+- 我方 `summary.txt`
+- 我方 `report.html`
+- 我方 TPM/RPM 实测值
+
+**对照客户 SLA 合同**：
+- 实测 ≥ 合同 → 放心用
+- 实测 90-100% → 跟客户对齐，必要时改合同或加限流
+- 实测 < 90% → 别签这个数，**先优化再签**
+
+### 8.3 给"工程"
+
+交付：
+- `compare-*.html`（最重要的就是这个）
+- latency overhead 数字（Step 7 的表）
+
+排查方向（按 overhead 大小）：
+- overhead < 20%：栈基本透明，看其他项
+- 20-50%：我方网关有额外 round-trip / 序列化 / TLS 终止成本，看 trace
+- > 50%：通常是我方有同步外调（鉴权、限流、日志）拖累 prefill，看架构
+
+---
+
+## 故障处理
+
+| 现象 | 处理 |
+|---|---|
+| 厂商报 429 限流 | 降 RPS 重跑，不要死磕 |
+| 我方报 connection refused | URL 错了 / 我方服务没起 |
+| upstream OK 但 our 大量 5xx | 我方栈问题 → 8.3 给工程 |
+| 两次 model 字符串不一致 | history 分到两个目录，compare 找不到。**回到 Step 1 统一** |
+| TPM 实测 > 厂商承诺 | 极少见——可能是厂商放开了限流。**和厂商对齐，确认不会回调** |
+| 想跑更长时间 | 用 `--pattern soak`（自动写 metrics.json checkpoint），duration 拉到 1h+ |
+
+---
+
+## 进阶
+
+- **批量接入**：3 个模型并行做 3 份 3 报告，给一个模型矩阵总览
+- **长跑稳定性**：把 Step 3/5 改成 `--pattern soak --duration 3600` + `--soak-checkpoint 60`
+- **区域对比**：同一模型、不同 region 都做 3 报告，画出 overhead-by-region 热图
+- **回归基线**：第 N 次接入时，跟第 1 次做 power-test-compare，看 overhead 增长
+
+---
+
+## 参考
+
+- `references/onboarding.md` — 完整 walkthrough、TPM/RPM 公式、SLA 阈值表
+- `power-test-run` — 单端点压测的细节（Step 3/5 用的就是它）
+- `power-test-compare` — 两次压测的 diff 解读（Step 6 用的就是它）
