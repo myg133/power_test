@@ -1,0 +1,22 @@
+# Multi-turn smoke test (M9 dynamic_multi + stateful via previous_response_id)
+# =========================================================================
+#
+# Two turns in one session. Turn 2 should carry the response_id
+# from turn 1 as `previous_response_id`, observable in:
+#   - metrics.json per_request[i].response_id (different per turn)
+#   - both records share the same session_id
+#   - server response continues from turn 1's context
+#
+# Run with:
+#   power_test run --config <this> --target <URL> --api responses ...
+
+[[items]]
+name = "stateful-smoke"
+weight = 1.0
+messages = [
+    { role = "system", content = "You are terse. Answer in one short sentence." },
+    { role = "user",   content = "What is 2 plus 2?" },
+]
+follow_ups = [
+    "And 3 plus 3?",
+]
