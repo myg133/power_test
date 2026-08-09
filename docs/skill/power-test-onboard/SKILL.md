@@ -40,6 +40,11 @@ description: |
 
 **确认**：用户给的 4 件事一致（尤其是 model 字符串一致），再进 Step 2。
 
+**`--api` 选型提示**：
+- **openai**（默认，chat-completions）— 通用，所有 OpenAI 兼容端点
+- **anthropic**（messages）— 走 Anthropic 协议
+- **responses**（M9，OpenAI `/v1/responses`）— **新模型（o1/o3/gpt-4o+）且要做 stateful agent 验证时优先用这个**。多轮走 `previous_response_id`，比 chat-completions 的全量重发省 token、首字节更快
+
 ---
 
 ## Step 2 · 上游厂商端点
@@ -47,9 +52,9 @@ description: |
 **问用户**：
 
 > 上游厂商的：
->   1. **URL？**（如 `https://api.deepseek.com/v1/chat/completions`）
+>   1. **URL？**（如 `https://api.deepseek.com/v1/chat/completions`，或 responses 端点的 `https://api.openai.com/v1/responses`）
 >   2. **API key？** 或"我已经设了 `OPENAI_API_KEY`"
->   3. **协议？** openai / anthropic（默认 openai）
+>   3. **协议？** openai / anthropic / **responses**（默认 openai；agent 多轮验证选 responses）
 
 **校验**：URL 合法 + key 非空（除非用户说"环境变量"）。
 
@@ -93,9 +98,9 @@ power_test run \
 **问用户**：
 
 > 我方自己的：
->   1. **URL？**（如 `https://api.mycompany.com/v1/chat/completions`）
+>   1. **URL？**（如 `https://api.mycompany.com/v1/chat/completions`，或 responses 端点）
 >   2. **API key？** 或"用环境变量"
->   3. **协议？** 默认跟上游一致
+>   3. **协议？** 默认跟上游一致（两边都选 responses 时，我方栈的 `previous_response_id` 接续链路就是 stateful 的）
 
 **警告**：提醒用户 key 别搞混——我方 key 调的是我方端点，不会打到上游。
 
