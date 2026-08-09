@@ -6,6 +6,7 @@ results/
 # Editor / IDE
 .idea/
 .vscode/
+.codewhale/
 .zread/
 *.swp
 *.swo
@@ -21,3 +22,11 @@ Thumbs.db
 
 # Ad-hoc probe output from manual runs
 *_probe.txt
+
+# temp files
+/*.ps1
+/*.txt
+/**/*.logs
+/*.csv
+/*temp.*
+/.tmp*.*
