@@ -93,6 +93,13 @@ pub struct RequestRecord {
     /// per iteration.
     #[serde(default)]
     pub spec_iterations: u32,
+    /// M9: server-side response id from the `/v1/responses`
+    /// endpoint. `None` for the other clients and on errored
+    /// requests. The session pool reads this and feeds it back
+    /// as `previous_response_id` on the next turn of the same
+    /// session, so it's the linchpin of stateful multi-turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
 }
 
 impl RequestRecord {
@@ -120,6 +127,7 @@ impl RequestRecord {
             spec_decoded_tok: m.spec_decoded_tok,
             spec_accepted_tok: m.spec_accepted_tok,
             spec_iterations: m.spec_iterations,
+            response_id: m.response_id.clone(),
         }
     }
 
@@ -858,6 +866,7 @@ mod tests {
             spec_decoded_tok: 0,
             spec_accepted_tok: 0,
             spec_iterations: 0,
+            response_id: None,
         };
         assert!((rec.tps() - 20.0).abs() < 0.01);
     }

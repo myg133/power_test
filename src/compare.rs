@@ -1090,6 +1090,7 @@ mod tests {
             spec_decoded_tok: 0,
             spec_accepted_tok: 0,
             spec_iterations: 0,
+            response_id: None,
         }
     }
 
