@@ -258,8 +258,9 @@ impl RunArgs {
             "openai" => Ok(ApiKind::Openai),
             "anthropic" => Ok(ApiKind::Anthropic),
             "raw" => Ok(ApiKind::Raw),
+            "responses" => Ok(ApiKind::Responses),
             other => Err(format!(
-                "unknown --api '{}': expected one of openai, anthropic, raw",
+                "unknown --api '{}': expected one of openai, anthropic, raw, responses",
                 other
             )),
         }

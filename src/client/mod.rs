@@ -3,6 +3,7 @@
 pub mod anthropic;
 pub mod openai;
 pub mod raw;
+pub mod responses;
 
 use std::time::Duration;
 
@@ -70,6 +71,13 @@ pub struct RequestMetrics {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Wall-clock time the request finished.
     pub finished_at: chrono::DateTime<chrono::Utc>,
+    /// M9: server-side response id from the `/v1/responses` endpoint.
+    /// Populated by [`responses::ResponsesClient`] after a successful
+    /// turn; empty for the other clients. The session pool reads this
+    /// and feeds it back as `previous_response_id` on the next turn
+    /// of the same session, enabling stateful multi-turn conversation
+    /// without re-sending the prior `input` items.
+    pub response_id: Option<String>,
 }
 
 impl RequestMetrics {
@@ -93,11 +101,19 @@ pub trait LlmClient: Send + Sync {
     /// user-role prompt and calls `send`. Clients with first-class
     /// multi-turn support (OpenAI, Anthropic) override this to send
     /// the real `messages` array.
+    ///
+    /// `previous_response_id` is an M9 hook for stateful APIs that
+    /// can resume a prior server-side conversation by id (the
+    /// OpenAI `/v1/responses` endpoint via `previous_response_id`).
+    /// Default impl ignores it; clients that support the hook
+    /// (currently only `ResponsesClient`) read it and act on it.
     async fn send_messages(
         &self,
         messages: &[OwnedChatMessage],
+        previous_response_id: Option<&str>,
         estimated_prompt_tokens: u32,
     ) -> RequestMetrics {
+        let _ = previous_response_id;
         let joined = messages
             .iter()
             .map(|m| format!("[{}] {}", m.role, m.content))
@@ -120,6 +136,10 @@ pub fn build(cfg: &crate::config::RunConfig) -> Result<Box<dyn LlmClient>> {
         }
         ApiKind::Raw => {
             let c = raw::RawClient::new(cfg)?;
+            Ok(Box::new(c))
+        }
+        ApiKind::Responses => {
+            let c = responses::ResponsesClient::new(cfg)?;
             Ok(Box::new(c))
         }
     }

@@ -772,7 +772,7 @@ async fn e2e_dynamic_multi_session_pool_2_sessions_2_turns() {
             let session_id = p.snapshot().last().unwrap().id.clone();
             // Turn 1: seed.
             let m1 = c
-                .send_messages(item.messages.as_ref().unwrap(), 1)
+                .send_messages(item.messages.as_ref().unwrap(), None, 1)
                 .await;
             let ctx1 = power_test::runner::CompletionContext::turn(session_id.clone(), 1, false);
             a.lock().await.record_completed(&m1, 0, &ctx1);
@@ -781,7 +781,7 @@ async fn e2e_dynamic_multi_session_pool_2_sessions_2_turns() {
             // Turn 2: follow_up.
             let mut msgs = h.messages();
             msgs.push(OwnedChatMessage::new("user", item.follow_ups[0].clone()));
-            let m2 = c.send_messages(&msgs, 1).await;
+            let m2 = c.send_messages(&msgs, None, 1).await;
             let ctx2 = power_test::runner::CompletionContext::turn(session_id.clone(), 2, true);
             a.lock().await.record_completed(&m2, 0, &ctx2);
             let r2 = h.complete(String::new(), false);
@@ -846,6 +846,7 @@ async fn e2e_static_multi_sends_full_messages_body() {
     let m = client
         .send_messages(
             &[OwnedChatMessage::new("user", "hi")],
+            None,
             1,
         )
         .await;
@@ -942,7 +943,7 @@ async fn e2e_dynamic_multi_response_text_flows_into_next_turn() {
 
     // Turn 1: send seed.
     let m1 = client
-        .send_messages(item.messages.as_ref().unwrap(), 1)
+        .send_messages(item.messages.as_ref().unwrap(), None, 1)
         .await;
     assert_eq!(m1.status, 200, "turn 1 err: {:?}", m1.error);
     assert_eq!(
@@ -961,7 +962,7 @@ async fn e2e_dynamic_multi_response_text_flows_into_next_turn() {
     // the only thing that grows the session).
     let mut msgs = h.messages();
     msgs.push(OwnedChatMessage::new("user", "second-question"));
-    let m2 = client.send_messages(&msgs, 1).await;
+    let m2 = client.send_messages(&msgs, None, 1).await;
     assert_eq!(m2.status, 200, "turn 2 err: {:?}", m2.error);
     assert_eq!(m2.response_text, "answer-two");
     // The wiremock `expect(1)` for the second turn would fail if

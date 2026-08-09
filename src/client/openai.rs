@@ -283,6 +283,7 @@ impl LlmClient for OpenaiClient {
     async fn send_messages(
         &self,
         messages: &[OwnedChatMessage],
+        _previous_response_id: Option<&str>,
         _estimated_prompt_tokens: u32,
     ) -> RequestMetrics {
         let body = self.build_body_messages(messages);
@@ -596,7 +597,7 @@ mod tests {
             OwnedChatMessage::new("assistant", "4."),
             OwnedChatMessage::new("user", "and 3+3?"),
         ];
-        let m = c.send_messages(&messages, 1).await;
+        let m = c.send_messages(&messages, None, 1).await;
         assert_eq!(m.status, 200, "err={:?}", m.error);
         assert!(m.error.is_none());
     }

@@ -278,8 +278,16 @@ async fn scheduler_loop(
                             // dataset loader guarantees item.messages is
                             // Some(_).
                             let messages = item.messages.clone().unwrap_or_default();
+                            // StaticMulti has no session, so
+                            // previous_response_id is always None.
+                            // Stateful multi-turn only happens in
+                            // DynamicMulti below.
                             let m = client_c
-                                .send_messages(&messages, item.estimated_prompt_tokens)
+                                .send_messages(
+                                    &messages,
+                                    None,
+                                    item.estimated_prompt_tokens,
+                                )
                                 .await;
                             let mut g = agg_c.lock().unwrap();
                             g.record_completed(&m, second_offset, &CompletionContext::none());
@@ -348,9 +356,24 @@ async fn run_dynamic_session(
             }
         }
         let continuation = turn > 1;
+        // M9: read the session's stored response_id (if any) and
+        // pass it as `previous_response_id` so the Responses API
+        // can resume the conversation without re-sending prior
+        // `input` items. On turn 1 this is None; on turn 2+ it's
+        // the response_id from the previous turn.
+        let previous_response_id = handle.response_id();
         let m = client
-            .send_messages(&messages, item.estimated_prompt_tokens)
+            .send_messages(
+                &messages,
+                previous_response_id.as_deref(),
+                item.estimated_prompt_tokens,
+            )
             .await;
+        // M9: stash the response_id from this turn so the next
+        // turn of this session can use it. For non-Responses
+        // clients `m.response_id` is None, which is the right
+        // default (no state to preserve).
+        handle.set_response_id(m.response_id.clone());
         let ctx = CompletionContext::turn(session_id.clone(), turn, continuation);
         // We just need a `u64` second offset for the aggregator;
         // reuse the first_second_offset captured before the

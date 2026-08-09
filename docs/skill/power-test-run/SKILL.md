@@ -42,13 +42,24 @@ description: |
 **问用户**：
 
 > 这个端点用哪种协议？
->   1. **openai**（OpenAI 兼容，默认）— vLLM、ollama、TGI、llama.cpp、Anthropic 转发网关都算
->   2. **anthropic**（Anthropic Messages 原生）
->   3. **raw**（其他 HTTP，自己拼 body）
+>   1. **openai**（OpenAI 兼容，默认）— `/v1/chat/completions`，vLLM、ollama、TGI、llama.cpp 都算
+>   2. **anthropic**（Anthropic Messages 原生）— `/v1/messages`
+>   3. **responses**（M9，OpenAI agent 时代新接口）— `/v1/responses`
+>   4. **raw**（其他 HTTP，自己拼 body）
 
 **默认**：openai。
 
-**判断小窍门**：URL 包含 `/chat/completions` 或 `/v1/` 且厂商是 OpenAI 系 → openai；URL 是 `/v1/messages` 且厂商是 Anthropic → anthropic；其他情况问用户。
+**判断小窍门**：
+- URL 包含 `/chat/completions` 或 `/v1/` 且厂商是 OpenAI 系 → openai
+- URL 是 `/v1/messages` 且厂商是 Anthropic → anthropic
+- URL 是 `/v1/responses` 且模型是 o1/o3/gpt-4o+ → **responses**（stateful 多轮便宜）
+- 其他情况问用户
+
+**`responses` 模式特殊说明**：
+- 多轮走 `previous_response_id`（不重发历史 `input`），token 成本低、首字节更快
+- 适合 agent 场景（每次只发新工具结果、新指令）
+- 配合 `--dataset custom` + TOML 多轮配置用 `dynamic_multi` 测对话链
+- 老的 gpt-3.5 / 非 OpenAI 端点大概率不识别这个 URL，选 openai
 
 ---
 
@@ -208,6 +219,7 @@ power_test run \
 - **批量轮换 prompt**：用 `--dataset custom --custom-path <file.jsonl>` 跑真业务流量。
 - **长时间稳定性**：用 `--pattern soak`，自动每 N 秒写一次 `metrics.json` checkpoint。
 - **跨环境对比**：跑两次（环境 A / 环境 B）后用 `power-test-compare`。
+- **agent 多轮（Responses）**：用 `--api responses` + `--dataset custom` 配多轮 TOML（`dynamic_multi`），session pool 自动用 `previous_response_id` 接续，省 token。
 
 ---
 

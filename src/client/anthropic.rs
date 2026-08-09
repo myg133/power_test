@@ -330,6 +330,7 @@ impl LlmClient for AnthropicClient {
     async fn send_messages(
         &self,
         messages: &[OwnedChatMessage],
+        _previous_response_id: Option<&str>,
         _estimated_prompt_tokens: u32,
     ) -> RequestMetrics {
         let body = self.build_body_messages(messages);

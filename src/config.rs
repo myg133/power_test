@@ -7,13 +7,23 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Which HTTP API style to speak. M1 only implements [`ApiKind::Openai`].
+/// Which HTTP API style to speak.
+///
+/// M1 only implemented [`ApiKind::Openai`]. M9 added [`ApiKind::Responses`]
+/// for OpenAI's newer `/v1/responses` endpoint, which differs from
+/// chat-completions in body shape (`input` instead of `messages`), streaming
+/// event types (typed events: `response.output_text.delta`,
+/// `response.reasoning_summary_text.delta`), and supports stateful
+/// multi-turn via `previous_response_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ApiKind {
     Openai,
     Anthropic,
     Raw,
+    /// M9: OpenAI `/v1/responses` (the agent-era endpoint).
+    /// See `src/client/responses.rs` for the implementation.
+    Responses,
 }
 
 impl ApiKind {
@@ -22,6 +32,7 @@ impl ApiKind {
             ApiKind::Openai => "openai",
             ApiKind::Anthropic => "anthropic",
             ApiKind::Raw => "raw",
+            ApiKind::Responses => "responses",
         }
     }
 }

@@ -44,6 +44,14 @@ pub struct Session {
     pub turn: u32,
     pub messages: Vec<OwnedChatMessage>,
     pub last_used: Instant,
+    /// M9: server-side response id from the last successful turn
+    /// (only meaningful for the `/v1/responses` API; `None` for
+    /// the other clients and on the very first turn). The executor
+    /// reads this on turn N+1 and passes it as
+    /// `previous_response_id` to the LlmClient, enabling stateful
+    /// multi-turn conversation without re-sending prior `input`
+    /// items.
+    pub response_id: Option<String>,
 }
 
 impl Session {
@@ -53,6 +61,7 @@ impl Session {
             turn: 0,
             messages: seed,
             last_used: Instant::now(),
+            response_id: None,
         }
     }
 
@@ -223,6 +232,26 @@ impl<'a> PoolHandle<'a> {
     pub fn messages(&self) -> Vec<OwnedChatMessage> {
         let sessions = self.pool.sessions.lock().expect("pool mutex");
         self.lookup(&sessions).messages.clone()
+    }
+
+    /// M9: read the session's stored `response_id` (from the
+    /// last successful turn). `None` on the first turn or for
+    /// clients that don't populate it.
+    pub fn response_id(&self) -> Option<String> {
+        let sessions = self.pool.sessions.lock().expect("pool mutex");
+        self.lookup(&sessions).response_id.clone()
+    }
+
+    /// M9: record the `response_id` returned by a successful
+    /// turn so the next turn can use it as
+    /// `previous_response_id`. The executor calls this with the
+    /// value from `RequestMetrics.response_id` after each turn.
+    pub fn set_response_id(&self, id: Option<String>) {
+        let mut sessions = self.pool.sessions.lock().expect("pool mutex");
+        let s = sessions
+            .get_mut(&self.id)
+            .expect("session handle is stale: the session was dropped or evicted.");
+        s.response_id = id;
     }
 
     /// Append `assistant` to the session's `messages`, bump the
