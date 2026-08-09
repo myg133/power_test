@@ -1,10 +1,12 @@
 # power_test 安装手册（agent 执行用）
 
-> **用途**：用户把这个文件的 URL 发给一个全新的 agent。agent 按下面步骤执行，自动装好 `power_test` 二进制和 3 个配套 Mavis skill，最后告知用户装好了。
+> **用途**：用户把这个文件的 URL 发给一个全新的 agent。agent 按下面步骤执行，自动装好 `power_test` 二进制和 3 个配套 agent skill，最后告知用户装好了。
+>
+> **预期 agent**：任意支持 skills 目录机制的 agent（MiniMax Code、Claude Code、Cursor、Codex 等）。脚本里**不要硬编码** skills 路径，agent 必须先识别自己在哪个平台上跑。
 >
 > **工作目录**：agent 当前所在的工作目录。脚本里所有相对路径都相对它。
 >
-> **预期结果**：`power_test --help` 能跑通，3 个 skill 在 Mavis skills 目录里就位。
+> **预期结果**：`power_test --help` 能跑通，3 个 skill 在 agent 自己的 skills 目录里就位。
 
 ---
 
@@ -147,17 +149,79 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # 或 ~/.zshrc
 
 ## 3. 装 skill
 
-Mavis skills 默认目录：
+> **关键：不要假设 skill 目录在 `~/.minimax/skills/`**。不同 agent 平台用不同的目录，agent 自己应该知道自己在哪。下面的步骤让 agent 先识别自己。
 
-| OS | 路径 |
-|---|---|
-| windows | `%USERPROFILE%\.minimax\skills\` |
-| macos / linux | `$HOME/.minimax/skills/` |
+### 3.1 识别自己的 skill 目录
 
-3 个活的 skill + 1 个 DEPRECATED 重定向：
+按以下顺序，**找到一个就停**：
+
+| 优先级 | 平台标记 | 候选目录（Windows 用 `%USERPROFILE%\…`，Unix 用 `$HOME/…`） |
+|---|---|---|
+| 1 | **从自己的环境/配置拿** | agent 进程的环境变量、config 路径、data dir（最可靠） |
+| 2 | MiniMax / MiniMax Code | `<home>/.minimax/skills/` |
+| 3 | Claude Code | `<home>/.claude/skills/` |
+| 4 | Cursor | `<home>/.cursor/skills/` |
+| 5 | Codex / OpenAI | `<home>/.codex/skills/` |
+| 6 | 通用 fallback | `<home>/.local/share/agent-skills/` |
+
+**实操（bash / zsh）：**
 
 ```bash
-SKILL_ROOT="${SKILL_ROOT:-$HOME/.minimax/skills}"
+# 先看自己环境/配置里有没有写明（很多 agent 进程会暴露 AGENT_HOME / SKILL_DIR 之类的环境变量）
+echo "AGENT_HOME=$AGENT_HOME"
+echo "SKILL_DIR=$SKILL_DIR"
+echo "AGENT_DATA_DIR=$AGENT_DATA_DIR"
+
+# 没就按 marker 目录挨个试，谁在就用谁
+for d in "$HOME/.minimax/skills" "$HOME/.claude/skills" "$HOME/.cursor/skills" "$HOME/.codex/skills"; do
+  if [ -d "$(dirname "$d")" ]; then
+    echo "FOUND: $d"
+    SKILL_ROOT="$d"
+    break
+  fi
+done
+[ -z "$SKILL_ROOT" ] && SKILL_ROOT="$HOME/.local/share/agent-skills"  # 兜底
+echo "using SKILL_ROOT=$SKILL_ROOT"
+```
+
+**实操（PowerShell）：**
+
+```powershell
+# 1. 先看环境变量
+Write-Host "AGENT_HOME=$env:AGENT_HOME"
+Write-Host "SKILL_DIR=$env:SKILL_DIR"
+Write-Host "AGENT_DATA_DIR=$env:AGENT_DATA_DIR"
+
+# 2. 按 marker 找
+$candidates = @(
+    "$env:USERPROFILE\.minimax\skills",
+    "$env:USERPROFILE\.claude\skills",
+    "$env:USERPROFILE\.cursor\skills",
+    "$env:USERPROFILE\.codex\skills"
+)
+foreach ($d in $candidates) {
+    if (Test-Path (Split-Path $d -Parent)) {
+        Write-Host "FOUND: $d"
+        $env:SKILL_ROOT = $d
+        break
+    }
+}
+if (-not $env:SKILL_ROOT) {
+    $env:SKILL_ROOT = "$env:USERPROFILE\.local\share\agent-skills"
+}
+Write-Host "using SKILL_ROOT=$env:SKILL_ROOT"
+```
+
+**如果找到多个**：问用户：「我看到 X 和 Y 两个 skills 目录。装到哪个？」（不要瞎猜）
+**如果一个都找不到**：问用户：「你用的是什么 agent？告诉我你的 skills 目录在哪？」
+
+### 3.2 拉到本地
+
+确认 `SKILL_ROOT` 之后，拉 4 个 skill：
+
+**bash：**
+
+```bash
 REPO_BASE="https://raw.githubusercontent.com/myg133/power_test/main/docs/skill"
 
 fetch_skill() {
@@ -185,6 +249,33 @@ fetch_skill power-test-onboard \
 
 fetch_skill power-test \
   SKILL.md
+```
+
+**PowerShell：**
+
+```powershell
+$REPO_BASE = "https://raw.githubusercontent.com/myg133/power_test/main/docs/skill"
+
+function Fetch-Skill {
+    param([string]$Skill, [string[]]$Paths)
+    foreach ($path in $Paths) {
+        $url = "$REPO_BASE/$Skill/$path"
+        $dest = Join-Path $SKILL_ROOT "$Skill/$path"
+        $dir = Split-Path $dest -Parent
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+        } catch {
+            Write-Host "拉失败: $url"; return $false
+        }
+    }
+    return $true
+}
+
+Fetch-Skill 'power-test-run' @('SKILL.md','references/patterns-and-datasets.md','references/report-interpretation.md')
+Fetch-Skill 'power-test-compare' @('SKILL.md','references/compare-interpretation.md')
+Fetch-Skill 'power-test-onboard' @('SKILL.md','references/onboarding.md')
+Fetch-Skill 'power-test' @('SKILL.md')
 ```
 
 > 如果 GitHub raw 访问不到（企业代理），让用户从已 clone 的仓库 `cp -r docs/skill/* $SKILL_ROOT/`，agent 接着跑。
