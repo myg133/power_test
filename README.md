@@ -8,17 +8,17 @@ saved as a self-contained HTML report and a JSON record under
 `~/.power_test/history/`.
 
 ```
-$ power_test run --target https://api.openai.com/v1/chat/completions \
-                 --rps 5 --duration 30 --model gpt-4o-mini
+$ power_test run --target https://open-gateway.anspire.ai/v6/chat/completions \
+                 --rps 5 --duration 30 --model deepseek-v4-flash
 
-starting run 7a1f... -> https://api.openai.com/v1/chat/completions (rps=5, duration=30s, concurrency=256)
+starting run 7a1f... -> https://open-gateway.anspire.ai/v6/chat/completions (rps=5, duration=30s, concurrency=256)
   ... 30s later ...
 
 power_test summary
 =================
 run id:    7a1f-...
-target:    https://api.openai.com/v1/chat/completions
-model:     gpt-4o-mini
+target:    https://open-gateway.anspire.ai/v6/chat/completions
+model:     deepseek-v4-flash
 started:   2026-08-05T17:21:13Z
 duration:  30.0s
 requests:  148 (147 success, 1 error)
@@ -66,7 +66,7 @@ cargo build --release
 # 2. Run against a public OpenAI-compatible endpoint
 export OPENAI_API_KEY=sk-...
 ./target/release/power_test run \
-    --target https://api.openai.com/v1/chat/completions \
+    --target https://open-gateway.anspire.ai/v6/chat/completions \
     --rps 5 --duration 60 --model gpt-4o-mini
 
 # 3. Inspect results
@@ -181,9 +181,9 @@ then `~/.power_test/`). **CLI flags always win over TOML fields.**
 ```toml
 # ~/.power_test/config.toml
 
-target = "https://api.openai.com/v1/chat/completions"
+target = "https://open-gateway.anspire.ai/v6/chat/completions"
 api = "openai"
-model = "gpt-4o-mini"
+model = "deepseek-v4-flash"
 rps = 10
 duration = 60
 concurrency = 256
