@@ -46,6 +46,7 @@ fn build_config(target: String, duration_secs: u64) -> RunConfig {
         raw_body_file: None,
         raw_content_type: None,
         model_alias: None,
+        thinking_disabled: false,
     }
 }
 

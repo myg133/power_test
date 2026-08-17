@@ -938,6 +938,7 @@ mod tests {
             raw_body_file: None,
             raw_content_type: None,
             model_alias: None,
+            thinking_disabled: false,
         }
     }
 

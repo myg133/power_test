@@ -40,6 +40,10 @@ pub struct AnthropicClient {
     /// instead. We try `x-api-key` first; `Bearer` is only a fallback
     /// for empty configs (we don't double-set headers).
     api_key: Option<String>,
+    /// M9.x: when set, every body we send carries
+    /// `"thinking": {"type": "disabled"}` so the model skips the
+    /// chain-of-thought block. Filled from `cfg.thinking_disabled`.
+    thinking_disabled: bool,
 }
 
 impl AnthropicClient {
@@ -65,6 +69,7 @@ impl AnthropicClient {
             max_tokens: cfg.max_tokens,
             stream: cfg.stream,
             api_key: key,
+            thinking_disabled: cfg.thinking_disabled,
         })
     }
 
@@ -78,6 +83,7 @@ impl AnthropicClient {
                 content: prompt,
             }],
             stream: self.stream,
+            thinking: self.thinking_field(),
         }
     }
 
@@ -101,6 +107,20 @@ impl AnthropicClient {
             max_tokens: self.max_tokens,
             messages: borrowed,
             stream: self.stream,
+            thinking: self.thinking_field(),
+        }
+    }
+
+    /// Build the optional `thinking` field. Returns `Some(ThinkingConfig)`
+    /// when `--no-thinking` is on, `None` otherwise (so the field is
+    /// absent from the serialized body for the default case).
+    fn thinking_field(&self) -> Option<ThinkingConfig> {
+        if self.thinking_disabled {
+            Some(ThinkingConfig {
+                r#type: "disabled",
+            })
+        } else {
+            None
         }
     }
 
@@ -387,6 +407,19 @@ pub struct AnthropicRequest<'a> {
     pub max_tokens: u32,
     pub messages: Vec<AnthropicMessage<'a>>,
     pub stream: bool,
+    /// M9.x: present only when `--no-thinking` is set. Anthropic
+    /// accepts `{"type": "disabled"}` to skip the chain-of-thought
+    /// block (faster TTFT, no reasoning tokens billed as output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThinkingConfig {
+    /// Always `"disabled"` in the current implementation. The
+    /// `type` field name must be reserved-quoted because `type`
+    /// is a Rust keyword.
+    pub r#type: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -548,6 +581,7 @@ mod tests {
             raw_body_file: None,
             raw_content_type: None,
             model_alias: None,
+            thinking_disabled: false,
         }
     }
 
@@ -564,6 +598,65 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"], "hello world");
+    }
+
+    #[test]
+    fn thinking_field_absent_by_default() {
+        // Without --no-thinking, the body should NOT carry a `thinking`
+        // key at all (skip_serializing_if). Confirms we don't
+        // accidentally send a default-enabled thinking block.
+        let cfg = base_config();
+        let c = AnthropicClient::new(&cfg).unwrap();
+        let body = c.build_body("hi");
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(
+            json.get("thinking").is_none(),
+            "thinking key must be absent when --no-thinking is off; got body: {json}"
+        );
+    }
+
+    #[test]
+    fn no_thinking_emits_disabled_thinking_block() {
+        // M9.x: with --no-thinking, the body must carry
+        //   "thinking": {"type": "disabled"}
+        // and nothing else. This is the contract Anthropic (and the
+        // Anspire gateway) reads to suppress the reasoning pass.
+        let mut cfg = base_config();
+        cfg.thinking_disabled = true;
+        let c = AnthropicClient::new(&cfg).unwrap();
+        let body = c.build_body("hi");
+        let json = serde_json::to_value(&body).unwrap();
+        let thinking = json.get("thinking").expect("thinking key missing");
+        assert_eq!(thinking["type"], "disabled");
+        // No `budget_tokens` etc. — `disabled` is a single-key object.
+        assert_eq!(thinking.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn no_thinking_propagates_to_multi_turn_body() {
+        // Multi-turn path (send_messages) must also carry the flag,
+        // otherwise a session-long run would silently drop it on turn 2+.
+        let mut cfg = base_config();
+        cfg.thinking_disabled = true;
+        let c = AnthropicClient::new(&cfg).unwrap();
+        let msgs = vec![
+            OwnedChatMessage {
+                role: "user".into(),
+                content: "first".into(),
+            },
+            OwnedChatMessage {
+                role: "assistant".into(),
+                content: "ack".into(),
+            },
+            OwnedChatMessage {
+                role: "user".into(),
+                content: "second".into(),
+            },
+        ];
+        let body = c.build_body_messages(&msgs);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["thinking"]["type"], "disabled");
+        assert_eq!(json["messages"].as_array().unwrap().len(), 3);
     }
 
     #[test]

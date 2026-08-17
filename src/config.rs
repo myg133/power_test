@@ -360,6 +360,15 @@ pub struct RunConfig {
     /// so old `config.json` files (pre-M6g) still load.
     #[serde(default)]
     pub model_alias: Option<String>,
+    /// M9.x: disable the model's reasoning/chain-of-thought pass.
+    /// On the Anthropic API, emits `"thinking": {"type": "disabled"}`
+    /// in the request body so the model skips the thinking block
+    /// entirely (faster TTFT, no scratch tokens). No-op for the
+    /// other clients (OpenAI chat-completions has no equivalent;
+    /// Responses API has its own `reasoning_effort` knob, not
+    /// yet wired here).
+    #[serde(default)]
+    pub thinking_disabled: bool,
 }
 
 impl RunConfig {
@@ -543,6 +552,7 @@ mod tests {
             raw_body_file: None,
             raw_content_type: None,
             model_alias: None,
+            thinking_disabled: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RunConfig = serde_json::from_str(&json).unwrap();
