@@ -81,6 +81,16 @@ pub struct RunArgs {
     #[arg(long, value_name = "NAME")]
     pub model_alias: Option<String>,
 
+    /// Disable the model's reasoning / chain-of-thought pass.
+    /// Anthropic-specific: emits `"thinking": {"type": "disabled"}`
+    /// in the request body so the model skips the thinking block
+    /// entirely (faster TTFT, no scratch tokens billed as output).
+    /// No-op for `--api openai` / `--api responses` / `--api raw`
+    /// (OpenAI chat-completions has no equivalent, Responses API
+    /// uses a different `reasoning_effort` knob, not wired here).
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub no_thinking: bool,
+
     /// Literal prompt text. Implies `--dataset literal` unless
     /// `--dataset` is set explicitly. Defaults to a built-in short
     /// prompt if neither `--prompt` nor `--prompt-tokens` is set.
@@ -466,6 +476,7 @@ impl RunArgs {
             raw_body_file: self.raw_body_file.clone(),
             raw_content_type: self.raw_content_type.clone(),
             model_alias: self.model_alias.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            thinking_disabled: self.no_thinking,
         })
     }
 
@@ -665,6 +676,7 @@ mod tests {
             duration: 5,
             model: "m".into(),
             model_alias: None,
+            no_thinking: false,
             prompt: None,
             prompt_tokens: None,
             max_tokens: 32,
