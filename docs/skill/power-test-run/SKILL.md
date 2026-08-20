@@ -113,6 +113,30 @@ description: |
 
 按用户选择追问具体规模。
 
+### Step 5b · 停止条件（time-based vs count-based）
+
+**问用户**（2 选 1）：
+
+> 跑多久？
+>   1. **跑到 N 秒就停**（默认，`--duration N`）— 适合"测 X 秒看稳态"或"压到崩"
+>   2. **跑到 N 个请求就停**（`--max-requests N`）— 适合"发够 N 个看延迟分布"或"小流量配额测试"
+>
+> 第二种选 2 的话，再追问：要发够多少个？常见：50、100、300、1000。
+
+**默认**：1（time-based）。只有用户明确说"发 N 个就停"/"打满 N 个"/"配额测试"才选 2。
+
+**count-based 的两种典型用法**（在 进阶 也写了一份）：
+
+```bash
+# 1) "打到 N 个并发，请求都返回就结束"（突发饱和）
+power_test run --rps 1000 --concurrency N --max-requests N --duration 600 ...
+
+# 2) "每 10s 50 个，发满 300 个就结束"（配额）
+power_test run --rps 5 --max-requests 300 --duration 600 ...
+```
+
+⚠️ **小流量/私部模型的警告**：突发饱和模式对模型 server 杀伤力大，**先小 N 试水**（4-8 个并发）确认 server 不会 OOM / 不会卡 GPU，再放大。私部模型（自己机器上的 vLLM / ollama）尤其要慢点升。
+
 ---
 
 ## Step 6 · prompt 来源
@@ -220,6 +244,11 @@ power_test run \
 - **长时间稳定性**：用 `--pattern soak`，自动每 N 秒写一次 `metrics.json` checkpoint。
 - **跨环境对比**：跑两次（环境 A / 环境 B）后用 `power-test-compare`。
 - **agent 多轮（Responses）**：用 `--api responses` + `--dataset custom` 配多轮 TOML（`dynamic_multi`），session pool 自动用 `previous_response_id` 接续，省 token。
+- **count-based stop**（`--max-requests N`）—— 达到 N 个请求就停，不等时间。两种典型：
+  - **突发饱和**：`--rps 1000 --concurrency N --max-requests N`，把 N 个并发一次性打出去，等它们都返回就结束。`--duration` 留大点（600s）当兜底。
+  - **配额速率**：`--rps 5 --max-requests 300`，按 5 RPS（= 50/10s）持续发，到 300 个就停。`--duration` 留 60s 当理论时长，cap 会更早触发。
+  - 触发后 in-flight 请求会走 10s drain 才退（拿到所有结果才出报告）。如果 server 太慢，drain 会超时并把还没返回的标记成 `interrupted: yes`。
+  - **私部/小流量模型**：突发饱和会把 server 打挂。先 `--concurrency 4 --max-requests 8` 试水，确认 server 没事再放大。`power-test-run` v0.2.4+ 才有这个 flag。
 
 ---
 
