@@ -251,33 +251,21 @@ async fn scheduler_loop(
         match Arc::clone(&semaphore).try_acquire_owned() {
             Ok(permit) => {
                 let second_offset = start.elapsed().as_secs();
-                let hit_max_requests = {
-                    let mut g = agg.lock().unwrap();
-                    g.record_scheduled();
-                    g.record_started_at(second_offset);
-                    // M9.x: count-based stop. If the run was launched
-                    // with `--max-requests N`, exit the scheduler as
-                    // soon as N requests have been scheduled. The
-                    // outer `run_with_cancel` then drains the
-                    // in-flight workers (up to 10s) before producing
-                    // the final summary, so partial results aren't
-                    // dropped on the floor.
-                    cfg.max_requests.is_some_and(|cap| g.scheduled() >= cap)
-                };
-                if hit_max_requests {
-                    // M9.x: wake the main task so it doesn't wait
-                    // out the full `--duration` ceiling. The main
-                    // task's `tokio::select!` is awaiting either
-                    // the duration timer or `cancel.notified()`;
-                    // we fire the latter here.
-                    cancel.notify_waiters();
-                    break;
-                }
+                // M9.x: count-based stop. The cap is checked AFTER the
+                // worker is spawned (see below) so the Nth request —
+                // the one that trips the cap — is still actually sent
+                // to the server. Without this ordering, "scheduled"
+                // would count a request we never dispatched.
                 let client_c = client.clone();
                 let dataset_c = dataset.clone();
                 let agg_c = agg.clone();
                 let start_c = start.clone();
                 let pool_c = session_pool.clone();
+                {
+                    let mut g = agg.lock().unwrap();
+                    g.record_scheduled();
+                    g.record_started_at(second_offset);
+                }
                 tokio::spawn(async move {
                     let item = dataset_c.next().await;
                     let second_offset = start_c.elapsed().as_secs();
@@ -324,6 +312,18 @@ async fn scheduler_loop(
                     }
                     drop(permit);
                 });
+                let hit_max_requests = {
+                    let g = agg.lock().unwrap();
+                    cfg.max_requests.is_some_and(|cap| g.scheduled() >= cap)
+                };
+                if hit_max_requests {
+                    // M9.x: wake the main task so it doesn't wait out
+                    // the full `--duration` ceiling. The Nth worker is
+                    // already in flight above; the drain loop picks it
+                    // up.
+                    cancel.notify_waiters();
+                    break;
+                }
             }
             Err(_) => {
                 let mut g = agg.lock().unwrap();

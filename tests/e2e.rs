@@ -881,6 +881,10 @@ async fn e2e_max_requests_stops_scheduler_at_count_not_at_duration() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\ndata: [DONE]\n\n"),
         )
+        .expect(7) // M9.x regression guard: the Nth request that trips
+        // the cap MUST actually be sent. (A previous bug counted
+        // it as "scheduled" but broke out of the loop before
+        // spawning the worker, so the server only saw N-1.)
         .mount(&server)
         .await;
 
