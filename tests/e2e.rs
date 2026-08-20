@@ -854,7 +854,72 @@ async fn e2e_static_multi_sends_full_messages_body() {
     assert_eq!(m.status, 200, "err={:?}", m.error);
 }
 
-/// M6d: the assistant text extracted from the streamed SSE
+/// M9.x: when a streaming read fails (server connection drops mid-
+/// stream, chunked encoding truncated, body doesn't match
+/// Content-Length, etc.), the `format_stream_error` helper attaches
+/// enough context — full source chain, status, content-encoding,
+/// transfer-encoding, bytes received, and `is_*` classification —
+/// to the error string that the next run's report shows what
+/// actually went wrong.
+///
+/// This is a unit-level test of the helper itself, not a
+/// wiremock-driven end-to-end. We can't easily make wiremock close
+/// a connection mid-stream (it always serves full responses), so we
+/// exercise the helper directly with a real `reqwest::Error`
+/// obtained from a request that failed at the transport layer.
+#[tokio::test]
+async fn format_stream_error_attaches_source_chain_and_headers() {
+    use power_test::client::format_stream_error;
+    use reqwest::header::{HeaderMap, HeaderValue, CONTENT_ENCODING, TRANSFER_ENCODING};
+    use std::error::Error as _;
+
+    // Get a real reqwest::Error. 127.0.0.1:1 is reserved / refused;
+    // reqwest surfaces a connect-error with a non-empty source chain
+    // (we just verified this in the test_helper example).
+    let client = reqwest::Client::new();
+    let err = client
+        .get("http://127.0.0.1:1/v1/chat/completions")
+        .send()
+        .await
+        .expect_err("connect to 127.0.0.1:1 must fail");
+    // The error from a connect-fail has at least one .source() entry.
+    assert!(err.source().is_some(), "expected non-empty source chain");
+
+    // Simulate the response headers we would have had if the
+    // request had reached a server. The helper must surface these
+    // exactly as the server sent them.
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+
+    let s = format_stream_error(&err, 200, &headers, 12345);
+    // 1. Top-level message is the reqwest Display form.
+    assert!(s.starts_with("stream read: "), "got: {s}");
+    // 2. Source chain is walked.
+    assert!(s.contains("cause[1]:"), "got: {s}");
+    // 3. Status is included.
+    assert!(s.contains("status: 200"), "got: {s}");
+    // 4. Content-Encoding is reported verbatim from the header map.
+    assert!(s.contains("content-encoding: gzip"), "got: {s}");
+    // 5. Transfer-Encoding is reported verbatim.
+    assert!(s.contains("transfer-encoding: chunked"), "got: {s}");
+    // 6. Bytes-received counter is reported.
+    assert!(s.contains("bytes-received-before-error: 12345"), "got: {s}");
+    // 7. The four classifier flags are all present (each on its own
+    //    line) — even if all are false, that's the diagnostic we
+    //    need to know the failure wasn't a decode/timeout/connect.
+    for flag in &[
+        "is_decode:",
+        "is_body:",
+        "is_timeout:",
+        "is_connect:",
+    ] {
+        assert!(s.contains(flag), "missing flag line '{flag}' in: {s}");
+    }
+    // 8. Connect-classification is correct for this particular error.
+    assert!(s.contains("is_connect: true"), "got: {s}");
+}
+
 /// `delta.content` chunks must flow into the next turn's
 /// `messages[]` body. We wiremock a 2-turn dynamic session where
 /// turn 1 streams "answer-one" and turn 2 streams "answer-two";

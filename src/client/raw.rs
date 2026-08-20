@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use super::{LlmClient, RequestMetrics};
+use super::{format_transport_error, LlmClient, RequestMetrics};
 use crate::config::RunConfig;
 use crate::error::{Error, Result};
 
@@ -99,7 +99,7 @@ impl LlmClient for RawClient {
         let resp = match self.build_request().send().await {
             Ok(r) => r,
             Err(e) => {
-                m.error = Some(format!("transport: {e}"));
+                m.error = Some(format_transport_error(&e));
                 m.total_duration = start.elapsed();
                 m.finished_at = chrono::Utc::now();
                 return m;

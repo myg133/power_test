@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 
-use super::{ChatMessage, ChatRequest, LlmClient, RequestMetrics, StreamOptions};
+use super::{
+    format_stream_error, format_transport_error, ChatMessage, ChatRequest, LlmClient,
+    RequestMetrics, StreamOptions,
+};
 use crate::config::RunConfig;
 use crate::dataset::OwnedChatMessage;
 use crate::error::Result;
@@ -88,6 +91,13 @@ impl OpenaiClient {
     }
 
     async fn parse_stream(&self, resp: reqwest::Response, start: Instant, m: &mut RequestMetrics) {
+        // M9.x: capture status + headers BEFORE moving the response
+        // into `bytes_stream()`. We need them to format the stream
+        // error with the full source chain + Content-Encoding /
+        // Transfer-Encoding context. Once `bytes_stream` is called
+        // we can no longer reach into the original response.
+        let status = resp.status();
+        let headers = resp.headers().clone();
         let mut stream = resp.bytes_stream();
         let mut parser = SseParser::new();
         let mut first_token_at: Option<Duration> = None;
@@ -95,6 +105,11 @@ impl OpenaiClient {
         let mut delta_count: u32 = 0;
         let mut usage_completion: Option<u32> = None;
         let mut usage_prompt: Option<u32> = None;
+        // M9.x: track total bytes received so a stream-read error
+        // can report "got N bytes, then failed" — useful for
+        // distinguishing "truncated early" vs "truncated late"
+        // when diagnosing proxy buffer issues.
+        let mut bytes_received: usize = 0;
         // M6d: collect the visible assistant text (delta.content
         // only — reasoning_content is NOT echoed back to the model
         // because most providers treat reasoning as ephemeral
@@ -105,10 +120,16 @@ impl OpenaiClient {
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    m.error = Some(format!("stream read: {e}"));
+                    m.error = Some(format_stream_error(
+                        &e,
+                        status.as_u16(),
+                        &headers,
+                        bytes_received,
+                    ));
                     break;
                 }
             };
+            bytes_received += chunk.len();
             let now = start.elapsed();
             for event in parser.feed(&chunk) {
                 if event.data == "[DONE]" {
@@ -310,7 +331,7 @@ impl OpenaiClient {
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
-                m.error = Some(format!("transport: {e}"));
+                m.error = Some(format_transport_error(&e));
                 m.total_duration = start.elapsed();
                 m.finished_at = chrono::Utc::now();
                 return m;

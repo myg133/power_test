@@ -87,6 +87,117 @@ impl RequestMetrics {
     }
 }
 
+/// M9.x: format a streaming-read error with enough context to diagnose
+/// the four most common intermittent failures:
+///
+/// 1. **Server-compressed body truncated** — server says
+///    `Content-Encoding: gzip` / `br` but the stream ends before the
+///    final byte. Common with reverse proxies whose buffer size is
+///    smaller than the response (nginx default `proxy_buffer_size 4k`
+///    bites here).
+/// 2. **HTTP/2 stream RST** — upstream vLLM / sglang / TGI crashes
+///    mid-generation; reqwest surfaces a `Body` error with `cause:
+///    stream error not reset`.
+/// 3. **Mismatched Content-Encoding** — proxy advertises gzip but
+///    sends raw bytes (or vice versa). reqwest's decoder barfs.
+/// 4. **Plain chunked-encoding truncation** — `Transfer-Encoding:
+///    chunked` stream that doesn't end with `0\r\n\r\n`.
+///
+/// All three streaming clients (openai / anthropic / responses) use
+/// this so the error string has the same shape across the codebase.
+///
+/// The `format!` of `reqwest::Error` only prints the top-level
+/// message; the underlying cause (often the smoking gun) lives in
+/// `e.source()`. We walk the full chain.
+pub fn format_stream_error(
+    e: &reqwest::Error,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    bytes_received: usize,
+) -> String {
+    use std::error::Error as _;
+    let mut out = format!("stream read: {e}");
+    // Walk the cause chain. `reqwest::Error` implements `Error` so
+    // `.source()` is the next-level error (e.g. `http::Error`,
+    // `hyper::Error`, a custom decoder error).
+    let mut src: Option<&dyn std::error::Error> = e.source();
+    let mut depth = 0;
+    while let Some(cause) = src {
+        depth += 1;
+        out.push_str(&format!("\n  cause[{depth}]: {cause}"));
+        src = cause.source();
+    }
+    out.push_str(&format!("\n  status: {status}"));
+    // Content-Encoding is the single most useful header for this
+    // class of errors. Absence is also informative — it tells the
+    // reader reqwest was decoding raw bytes (chunked or
+    // content-length framed), so the failure isn't a gzip/brotli
+    // decoder problem.
+    match headers.get(reqwest::header::CONTENT_ENCODING) {
+        Some(v) => out.push_str(&format!(
+            "\n  content-encoding: {}",
+            v.to_str().unwrap_or("<binary>")
+        )),
+        None => out.push_str("\n  content-encoding: (none)"),
+    }
+    match headers.get(reqwest::header::TRANSFER_ENCODING) {
+        Some(v) => out.push_str(&format!(
+            "\n  transfer-encoding: {}",
+            v.to_str().unwrap_or("<binary>")
+        )),
+        None => out.push_str("\n  transfer-encoding: (none)"),
+    }
+    out.push_str(&format!("\n  bytes-received-before-error: {bytes_received}"));
+    // `is_decode()` is true when the error is from the response body
+    // decoder (gzip / chunked). `is_body()` is true for body
+    // transport errors (connection drop, RST). Either one tells us
+    // whether the failure was on the decode side or the transport side.
+    out.push_str(&format!("\n  is_decode: {}", e.is_decode()));
+    out.push_str(&format!("\n  is_body: {}", e.is_body()));
+    out.push_str(&format!("\n  is_timeout: {}", e.is_timeout()));
+    out.push_str(&format!("\n  is_connect: {}", e.is_connect()));
+    out
+}
+
+/// M9.x: format a transport-level error (request never produced
+/// a response). Same shape as [`format_stream_error`] but without
+/// status / headers / bytes (none of which exist yet at this
+/// point in the lifecycle). The four most common cases:
+///
+/// 1. **DNS resolution failed** — `is_connect: true`, `cause: failed
+///    to lookup host ...` (e.g. wrong hostname, no DNS).
+/// 2. **TCP refused** — `is_connect: true`, `cause: tcp connect
+///    error: Connection refused (os error 111)` (server down,
+///    wrong port, firewall).
+/// 3. **TLS handshake failure** — `is_connect: true`, cause is a
+///    `rustls`/`native-tls` error (proxy intercepting HTTPS,
+///    cert expired, SNI mismatch).
+/// 4. **Client-side timeout** — `is_timeout: true` (slow target,
+///    network congestion).
+///
+/// Like `format_stream_error`, we walk `e.source()` so the OS-level
+/// error (e.g. `os error 10061`) reaches the report.
+pub fn format_transport_error(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut out = format!("transport: {e}");
+    let url = e.url().map(|u| u.to_string()).unwrap_or_default();
+    if !url.is_empty() {
+        out.push_str(&format!("\n  url: {url}"));
+    }
+    let mut src: Option<&dyn std::error::Error> = e.source();
+    let mut depth = 0;
+    while let Some(cause) = src {
+        depth += 1;
+        out.push_str(&format!("\n  cause[{depth}]: {cause}"));
+        src = cause.source();
+    }
+    out.push_str(&format!("\n  is_timeout: {}", e.is_timeout()));
+    out.push_str(&format!("\n  is_connect: {}", e.is_connect()));
+    out.push_str(&format!("\n  is_request: {}", e.is_request()));
+    out.push_str(&format!("\n  is_body: {}", e.is_body()));
+    out
+}
+
 /// Send one chat completion. Implementations must never panic on a bad
 /// response — they should return a [`RequestMetrics`] with `error` set.
 #[async_trait]

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::Serialize;
 
-use super::{LlmClient, RequestMetrics};
+use super::{format_stream_error, format_transport_error, LlmClient, RequestMetrics};
 use crate::config::RunConfig;
 use crate::dataset::OwnedChatMessage;
 use crate::error::{Error, Result};
@@ -147,6 +147,12 @@ impl AnthropicClient {
     }
 
     async fn parse_stream(&self, resp: reqwest::Response, start: Instant, m: &mut RequestMetrics) {
+        // M9.x: capture status + headers BEFORE moving the response
+        // into `bytes_stream()`. Used by `format_stream_error` to
+        // attach Content-Encoding / Transfer-Encoding / source chain
+        // to the error string.
+        let status = resp.status();
+        let headers = resp.headers().clone();
         let mut stream = resp.bytes_stream();
         let mut parser = AnthropicSseParser::new();
         let mut first_token_at: Option<Duration> = None;
@@ -154,6 +160,8 @@ impl AnthropicClient {
         let mut text_delta_count: u32 = 0;
         let mut usage_completion: Option<u32> = None;
         let mut usage_prompt: Option<u32> = None;
+        // M9.x: track total bytes received for the error report.
+        let mut bytes_received: usize = 0;
         // M6d: join visible text_delta deltas. thinking_delta is
         // NOT included — most providers treat reasoning as
         // ephemeral, not conversation history.
@@ -163,10 +171,16 @@ impl AnthropicClient {
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    m.error = Some(format!("stream read: {e}"));
+                    m.error = Some(format_stream_error(
+                        &e,
+                        status.as_u16(),
+                        &headers,
+                        bytes_received,
+                    ));
                     break;
                 }
             };
+            bytes_received += chunk.len();
             let now = start.elapsed();
             for event in parser.feed(&chunk) {
                 match event.event_kind {
@@ -371,7 +385,7 @@ impl AnthropicClient {
         let resp = match self.build_request(&body).send().await {
             Ok(r) => r,
             Err(e) => {
-                m.error = Some(format!("transport: {e}"));
+                m.error = Some(format_transport_error(&e));
                 m.total_duration = start.elapsed();
                 m.finished_at = chrono::Utc::now();
                 return m;
