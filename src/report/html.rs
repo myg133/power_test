@@ -939,6 +939,7 @@ mod tests {
             raw_content_type: None,
             model_alias: None,
             thinking_disabled: false,
+        max_requests: None,
         }
     }
 

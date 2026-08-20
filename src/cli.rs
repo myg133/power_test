@@ -66,6 +66,22 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 60)]
     pub duration: u64,
 
+    /// M9.x: count-based stop. When set, the run stops
+    /// scheduling new requests as soon as this many have been
+    /// scheduled. Use with `--rps` to control the rate. Two
+    /// common patterns:
+    ///
+    /// 1. `--rps 1000 --concurrency N --max-requests N` — fire
+    ///    N concurrent requests in the first tick, exit when
+    ///    all return.
+    /// 2. `--rps 5 --max-requests 300` — send 5/s (= 50/10s)
+    ///    until 300 total have been scheduled.
+    ///
+    /// `--duration` still acts as a hard ceiling: whichever
+    /// condition trips first wins.
+    #[arg(long, value_name = "N")]
+    pub max_requests: Option<u64>,
+
     /// Model name to send in the request body.
     #[arg(long, default_value = "gpt-3.5-turbo")]
     pub model: String,
@@ -477,6 +493,7 @@ impl RunArgs {
             raw_content_type: self.raw_content_type.clone(),
             model_alias: self.model_alias.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
             thinking_disabled: self.no_thinking,
+            max_requests: self.max_requests,
         })
     }
 
@@ -677,6 +694,7 @@ mod tests {
             model: "m".into(),
             model_alias: None,
             no_thinking: false,
+            max_requests: None,
             prompt: None,
             prompt_tokens: None,
             max_tokens: 32,

@@ -47,6 +47,7 @@ fn build_config(target: String, duration_secs: u64) -> RunConfig {
         raw_content_type: None,
         model_alias: None,
         thinking_disabled: false,
+        max_requests: None,
     }
 }
 
@@ -852,6 +853,166 @@ async fn e2e_static_multi_sends_full_messages_body() {
         )
         .await;
     assert_eq!(m.status, 200, "err={:?}", m.error);
+}
+
+/// M9.x: `--max-requests N` must stop the scheduler as soon as
+/// N requests have been scheduled, not when N requests have
+/// completed. This is the count-based stop condition that
+/// powers the two patterns users keep asking for:
+///   1. saturation burst — `--rps 1000 --concurrency N
+///      --max-requests N` (fire N at once, drain to finish)
+///   2. quoted RPS — `--rps X --max-requests N` (send X/s until
+///      N total have been scheduled, then exit)
+#[tokio::test]
+async fn e2e_max_requests_stops_scheduler_at_count_not_at_duration() {
+    use power_test::config::{
+        ApiKind, DatasetSpec, LoadPattern, PromptDistribution, PromptSource, RequestStrategy,
+        RunConfig,
+    };
+    use power_test::runner::{self, RunOptions};
+
+    // Wiremock that returns a tiny 200 OK body. We don't care
+    // about the response, only the count of scheduled requests.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\ndata: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    // 5 RPS, 60s duration, but cap at 7 requests. The scheduler
+    // must stop at 7 even though the duration hasn't elapsed.
+    // (5 RPS × 60s would otherwise be ~300 requests.)
+    let cfg = RunConfig {
+        run_id: "maxreq".into(),
+        target: format!("{}/v1/chat/completions", server.uri()),
+        api: ApiKind::Openai,
+        model: "gpt-3.5-turbo".into(),
+        prompt: PromptSource::Literal { text: "hi".into() },
+        dataset: DatasetSpec::Literal { text: "hi".into() },
+        strategy: RequestStrategy::Random,
+        prompt_distribution: PromptDistribution::from_single(1),
+        pattern: LoadPattern::Constant { rps: 5.0 },
+        max_tokens: 8,
+        stream: true,
+        target_rps: 5.0,
+        duration_secs: 60,
+        concurrency: 32,
+        tag: Some("maxreq".into()),
+        api_key: Some("sk-test".into()),
+        started_at: chrono::Local::now(),
+        raw_body_file: None,
+        raw_content_type: None,
+        model_alias: None,
+        thinking_disabled: false,
+        max_requests: Some(7),
+    };
+
+    let start = std::time::Instant::now();
+    let cancel = Arc::new(Notify::new());
+    let out = runner::run_with_cancel(
+        RunOptions {
+            config: cfg,
+            history_dir: std::env::temp_dir().join("power_test_maxreq"),
+            shared_aggregator: None,
+        },
+        cancel,
+    )
+    .await
+    .expect("run ok");
+    let elapsed = start.elapsed();
+
+    // The count cap must be respected.
+    assert_eq!(
+        out.aggregator.scheduled(),
+        7,
+        "max_requests=7 must stop the scheduler at exactly 7, got {}",
+        out.aggregator.scheduled()
+    );
+    // And the cap must trip BEFORE the 60s duration — at 5 RPS,
+    // 7 requests take ~1.2s of scheduling. We allow 10s to be
+    // safe under CI load.
+    assert!(
+        elapsed.as_secs() < 10,
+        "must exit early via count cap (not via 60s duration); got elapsed={elapsed:?}"
+    );
+}
+
+/// M9.x: when `max_requests` is NOT set, the existing time-based
+/// stop behavior is unchanged. This regression guard ensures the
+/// new field defaults to `None` and the executor takes the
+/// `start.elapsed() >= duration` path as before.
+#[tokio::test]
+async fn e2e_no_max_requests_keeps_time_based_stop() {
+    use power_test::config::{
+        ApiKind, DatasetSpec, LoadPattern, PromptDistribution, PromptSource, RequestStrategy,
+        RunConfig,
+    };
+    use power_test::runner;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\ndata: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    // 1 RPS for 2s, no max_requests cap. Should schedule ~2
+    // requests (one at t=0, one at t=1). The exact count varies
+    // under CI load, so we just check the run completes in
+    // approximately the configured duration (not 0s, not 60s).
+    let cfg = RunConfig {
+        run_id: "nomax".into(),
+        target: format!("{}/v1/chat/completions", server.uri()),
+        api: ApiKind::Openai,
+        model: "gpt-3.5-turbo".into(),
+        prompt: PromptSource::Literal { text: "hi".into() },
+        dataset: DatasetSpec::Literal { text: "hi".into() },
+        strategy: RequestStrategy::Random,
+        prompt_distribution: PromptDistribution::from_single(1),
+        pattern: LoadPattern::Constant { rps: 1.0 },
+        max_tokens: 8,
+        stream: true,
+        target_rps: 1.0,
+        duration_secs: 2,
+        concurrency: 8,
+        tag: Some("nomax".into()),
+        api_key: Some("sk-test".into()),
+        started_at: chrono::Local::now(),
+        raw_body_file: None,
+        raw_content_type: None,
+        model_alias: None,
+        thinking_disabled: false,
+        max_requests: None, // <-- the regression case
+    };
+
+    let start = std::time::Instant::now();
+    let cancel = Arc::new(Notify::new());
+    let _out = runner::run_with_cancel(
+        RunOptions {
+            config: cfg,
+            history_dir: std::env::temp_dir().join("power_test_nomax"),
+            shared_aggregator: None,
+        },
+        cancel,
+    )
+    .await
+    .expect("run ok");
+    let elapsed = start.elapsed();
+
+    // 1s minimum (one full tick) and well under 60s.
+    assert!(
+        (1..30).contains(&elapsed.as_secs()),
+        "time-based stop should still trigger around 2s; got {elapsed:?}"
+    );
 }
 
 /// M9.x: when a streaming read fails (server connection drops mid-

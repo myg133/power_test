@@ -369,6 +369,22 @@ pub struct RunConfig {
     /// yet wired here).
     #[serde(default)]
     pub thinking_disabled: bool,
+    /// M9.x: count-based stop. When `Some(N)`, the run stops
+    /// scheduling new requests as soon as N have been scheduled
+    /// (not when N have completed). Useful for the two
+    /// count-driven test shapes:
+    ///
+    /// 1. **Saturation burst** — `--rps 1000 --concurrency 300
+    ///    --max-requests 300` fires 300 concurrent requests in
+    ///    the first tick, then drains to completion.
+    /// 2. **Quoted RPS** — `--rps 5 --max-requests 300` sends
+    ///    5/s (= 50/10s) until 300 total have been scheduled.
+    ///
+    /// `None` (default) preserves the existing time-based stop
+    /// (`duration_secs`). Old `config.json` files load unchanged
+    /// (`#[serde(default)]`).
+    #[serde(default)]
+    pub max_requests: Option<u64>,
 }
 
 impl RunConfig {
@@ -553,6 +569,7 @@ mod tests {
             raw_content_type: None,
             model_alias: None,
             thinking_disabled: false,
+        max_requests: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: RunConfig = serde_json::from_str(&json).unwrap();

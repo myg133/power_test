@@ -573,6 +573,7 @@ kind = "built-in"
             request_strategy: "random".into(),
             model_alias: None,
             no_thinking: false,
+            max_requests: None,
             raw_body_file: None,
             raw_content_type: None,
             tui: false,

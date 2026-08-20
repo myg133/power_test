@@ -251,10 +251,27 @@ async fn scheduler_loop(
         match Arc::clone(&semaphore).try_acquire_owned() {
             Ok(permit) => {
                 let second_offset = start.elapsed().as_secs();
-                {
+                let hit_max_requests = {
                     let mut g = agg.lock().unwrap();
                     g.record_scheduled();
                     g.record_started_at(second_offset);
+                    // M9.x: count-based stop. If the run was launched
+                    // with `--max-requests N`, exit the scheduler as
+                    // soon as N requests have been scheduled. The
+                    // outer `run_with_cancel` then drains the
+                    // in-flight workers (up to 10s) before producing
+                    // the final summary, so partial results aren't
+                    // dropped on the floor.
+                    cfg.max_requests.is_some_and(|cap| g.scheduled() >= cap)
+                };
+                if hit_max_requests {
+                    // M9.x: wake the main task so it doesn't wait
+                    // out the full `--duration` ceiling. The main
+                    // task's `tokio::select!` is awaiting either
+                    // the duration timer or `cancel.notified()`;
+                    // we fire the latter here.
+                    cancel.notify_waiters();
+                    break;
                 }
                 let client_c = client.clone();
                 let dataset_c = dataset.clone();
